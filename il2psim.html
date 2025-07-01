@@ -1,0 +1,877 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IL2P Packet Radio Simulator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', 'monospace', sans-serif;
+        }
+        /* Custom styles for better visual feedback */
+        .status-connected { color: #22c55e; /* green-500 */ }
+        .status-disconnected { color: #ef4444; /* red-500 */ }
+        .status-connecting, .status-disconnecting { color: #f97316; /* orange-500 */ }
+
+        .log-message-ui { color: #3b82f6; /* blue-500 */ }
+        .log-message-info { color: #1f2937; /* gray-800 */ }
+        .log-message-system { color: #8b5cf6; /* violet-500 */ }
+        .log-message-error { color: #ef4444; /* red-500 */ }
+        .log-message-debug { color: #6b7280; /* gray-500 */ }
+
+        .btn {
+            padding: 8px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .btn-primary { background-color: #3b82f6; color: white; }
+        .btn-primary:hover { background-color: #2563eb; }
+        .btn-primary:disabled { background-color: #9ca3af; cursor: not-allowed; }
+
+        .btn-secondary { background-color: #6b7280; color: white; }
+        .btn-secondary:hover { background-color: #4b5563; }
+
+        .btn-success { background-color: #22c55e; color: white; }
+        .btn-success:hover { background-color: #16a34a; }
+
+        .btn-danger { background-color: #ef4444; color: white; }
+        .btn-danger:hover { background-color: #dc2626; }
+        .btn-danger:disabled { background-color: #9ca3af; cursor: not-allowed; }
+
+        .node-panel {
+            flex: 1 1 30%;
+            min-width: 350px;
+        }
+
+        #status-message-box {
+            transition: opacity 0.5s ease-in-out, transform 0.5s ease-in-out;
+            transform: translateY(-100%);
+            opacity: 0;
+        }
+        #status-message-box.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 p-4 lg:p-8">
+
+    <!-- Main Container -->
+    <div class="container mx-auto">
+        <h1 class="text-3xl font-bold text-center text-gray-800 mb-6">IL2P Packet Radio Simulator</h1>
+
+        <!-- Status Message Box -->
+        <div id="status-message-box" class="fixed top-5 left-1/2 -translate-x-1/2 bg-yellow-400 text-gray-800 font-semibold py-2 px-6 rounded-lg shadow-lg">
+            <span id="status-message-text"></span>
+        </div>
+
+        <!-- Node Panels -->
+        <div class="flex flex-wrap justify-center gap-6 mb-6">
+            <div id="node-a-panel" class="node-panel bg-white p-5 rounded-lg shadow-md border border-gray-200"></div>
+            <div id="node-b-panel" class="node-panel bg-white p-5 rounded-lg shadow-md border border-gray-200"></div>
+            <div id="node-c-panel" class="node-panel bg-white p-5 rounded-lg shadow-md border border-gray-200"></div>
+        </div>
+
+        <!-- Universal Send Message Section -->
+        <div class="bg-green-50 p-6 rounded-lg shadow-md border border-gray-200">
+            <h2 class="text-2xl font-bold text-gray-700 mb-4">Universal Message Sender</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+                <div>
+                    <label for="sender-select" class="block text-sm font-medium text-gray-600 mb-1">Source Node</label>
+                    <select id="sender-select" class="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500"></select>
+                </div>
+                <div>
+                    <label for="iframe-dest-select" class="block text-sm font-medium text-gray-600 mb-1">I-Frame Destination</label>
+                    <select id="iframe-dest-select" class="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500"></select>
+                </div>
+                <div>
+                    <label for="uiframe-dest-select" class="block text-sm font-medium text-gray-600 mb-1">UI-Frame Destination</label>
+                    <select id="uiframe-dest-select" class="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500"></select>
+                </div>
+                <div>
+                    <label for="digipeater-select" class="block text-sm font-medium text-gray-600 mb-1">Digipeater (for UI)</label>
+                    <select id="digipeater-select" class="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500"></select>
+                </div>
+            </div>
+            <textarea id="message-to-send" rows="3" class="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 mb-4" placeholder="Enter message to send..."></textarea>
+            <div class="flex items-center gap-4">
+                <button id="send-i-btn" class="btn btn-success">Send I-Frame</button>
+                <button id="send-ui-btn" class="btn btn-primary">Send UI-Frame</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        // --- IL2P Protocol Constants ---
+        const IL2P_CONSTANTS = {
+            FLAG_BYTE: 0x7E,
+            PID_NO_LAYER_3: 0xF0, // Default PID for no Layer 3 protocol
+
+            // Control Field Masks and Values (IL2P specific)
+            // I-Frame: N(S) (bits 1-3), P/F (bit 4), N(R) (bits 5-7), 0 (bit 0)
+            CONTROL_I_MASK: 0x01, // LSB is 0 for I-frames
+            CONTROL_I_BIT: 0x00,
+
+            // S-Frame: Type (bits 2-3), P/F (bit 4), N(R) (bits 5-7), 01 (bits 0-1)
+            CONTROL_S_MASK: 0x03, // LSBs are 01 for S-frames
+            CONTROL_S_BIT: 0x01,
+            CONTROL_RR: 0x01, // Receive Ready (00000001)
+            CONTROL_RNR: 0x05, // Receive Not Ready (00000101)
+            CONTROL_REJ: 0x09, // Reject (00001001)
+
+            // U-Frame: Type (bits 2-3, 6-7), P/F (bit 4), 11 (bits 0-1)
+            CONTROL_U_MASK: 0x03, // LSBs are 11 for U-frames
+            CONTROL_U_BIT: 0x03,
+            CONTROL_SABM: 0x2F, // Set Asynchronous Balanced Mode (00101111)
+            CONTROL_DISC: 0x43, // Disconnect (01000011)
+            CONTROL_UA: 0x63, // Unnumbered Acknowledgment (01100011)
+            CONTROL_DM: 0x87, // Disconnected Mode (10000111)
+            CONTROL_UI: 0x03, // Unnumbered Information (00000011) - Note: This is the raw value, not masked.
+            CONTROL_XID: 0xAF, // Exchange Identification (10101111)
+            CONTROL_TEST: 0xE3, // Test (11100011)
+            CONTROL_FRMR: 0x87, // Frame Reject (10000111) - Note: Same value as DM, distinguished by context/info field.
+
+            P_F_BIT_MASK: 0x10, // Poll/Final bit (bit 4)
+        };
+
+        // --- Utility Functions ---
+        function encodeCallsign(callsign, isLastAddress, isCommand, isDigipeater = false, hasBeenDigipeated = false) {
+            const parts = callsign.split('-');
+            let baseCallsign = parts[0].toUpperCase();
+            let ssid = parts.length > 1 ? parseInt(parts[1], 10) : 0;
+            if (isNaN(ssid) || ssid < 0 || ssid > 15) ssid = 0;
+            baseCallsign = baseCallsign.substring(0, 6);
+
+            const addressBytes = new Uint8Array(7);
+            for (let i = 0; i < 6; i++) {
+                addressBytes[i] = (baseCallsign.charCodeAt(i) || 0x20) << 1; // Left shift by 1 for IL2P
+            }
+
+            let lastByte = (ssid << 1) | (1 << 5); // SSID in bits 1-4, 5th bit always 1 (EA bit)
+            
+            // C/R bit (bit 7) for Source/Destination
+            if (!isDigipeater) {
+                if (!isCommand) lastByte |= (1 << 7); // 1 for Response, 0 for Command
+            } else { // H bit (bit 7) for Digipeater
+                if (hasBeenDigipeated) lastByte |= (1 << 7); // 1 if digipeated
+            }
+
+            if (isLastAddress) lastByte |= 0x01; // EA bit (bit 0) is 1 for the last address
+            addressBytes[6] = lastByte;
+            return addressBytes;
+        }
+
+        function decodeCallsign(bytes) {
+            let callsign = '';
+            for (let i = 0; i < 6; i++) {
+                callsign += String.fromCharCode(bytes[i] >>> 1); // Right shift by 1 to get char code
+            }
+            const ssidByte = bytes[6];
+            const ssid = (ssidByte >>> 1) & 0x0F; // Extract SSID from bits 1-4
+            const isLastAddress = (ssidByte & 0x01) === 1; // EA bit
+            const crOrHBit = (ssidByte >>> 7) & 0x01; // C/R bit for source/dest, H bit for digi
+
+            return {
+                callsign: callsign.trim(),
+                ssid: ssid,
+                isLastAddress: isLastAddress,
+                crOrHBit: crOrHBit // This will be C/R for first two addresses, H for digis
+            };
+        }
+
+        function calculateFCS(bytes) {
+            let fcs = 0xFFFF;
+            const polynomial = 0x8408; // CRC-16-CCITT polynomial
+            for (const byte of bytes) {
+                fcs ^= byte;
+                for (let i = 0; i < 8; i++) {
+                    fcs = (fcs & 0x0001) ? (fcs >>> 1) ^ polynomial : fcs >>> 1;
+                }
+            }
+            return fcs ^ 0xFFFF;
+        }
+
+        // Helper function to convert Uint8Array to hex string
+        function bytesToHex(bytes) {
+            return Array.from(bytes).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+        }
+
+        // --- IL2P Encoder & Decoder Classes ---
+        class IL2PPacketEncoder {
+            /**
+             * Encodes an IL2P packet.
+             * @param {string} destination - Destination callsign (e.g., 'NODEB-1').
+             * @param {string} source - Source callsign (e.g., 'NODEA-1').
+             * @param {Array<Object>} repeaters - Array of digipeater objects { callsign: string, ssid: number, hasBeenDigipeated: boolean }.
+             * @param {number} controlByteValue - The raw control byte value.
+             * @param {number} [ns=0] - N(S) sequence number for I-frames.
+             * @param {number} [nr=0] - N(R) sequence number for I/S-frames.
+             * @param {boolean} [p_f_bit=false] - Poll/Final bit.
+             * @param {Uint8Array} [info=null] - The payload data.
+             * @returns {Uint8Array} The complete IL2P packet bytes.
+             */
+            encodeFrame(destination, source, repeaters, controlByteValue, ns = 0, nr = 0, p_f_bit = false, pid = IL2P_CONSTANTS.PID_NO_LAYER_3, info = null) {
+                const addressFields = [];
+                // Destination Address (Command/Response bit based on isCommandFrame)
+                // Source Address (Command/Response bit based on isCommandFrame)
+                // For IL2P, the C/R bit is set in the source address for response frames, and dest for command frames.
+                // We'll assume the first address is always the destination, and the second is source.
+                // The isCommand parameter will be passed to encodeCallsign.
+                const isCommandFrame = (controlByteValue & IL2P_CONSTANTS.CONTROL_U_MASK) !== IL2P_CONSTANTS.CONTROL_U_BIT ||
+                                       (controlByteValue === IL2P_CONSTANTS.CONTROL_SABM || controlByteValue === IL2P_CONSTANTS.CONTROL_DISC ||
+                                        controlByteValue === IL2P_CONSTANTS.CONTROL_TEST || controlByteValue === IL2P_CONSTANTS.CONTROL_XID);
+
+                addressFields.push(encodeCallsign(destination, repeaters.length === 0 && !source, isCommandFrame));
+                if (source) {
+                    addressFields.push(encodeCallsign(source, repeaters.length === 0, !isCommandFrame)); // C/R bit is inverse for source
+                }
+                repeaters.forEach((repeater, index) => {
+                    addressFields.push(encodeCallsign(repeater.callsign, index === repeaters.length - 1, false, true, repeater.hasBeenDigipeated || false));
+                });
+
+                const addressBytes = new Uint8Array(addressFields.reduce((acc, val) => acc.concat(Array.from(val)), []));
+                
+                let controlByte = 0;
+                const frameType = controlByteValue & IL2P_CONSTANTS.CONTROL_U_MASK; // Check LSBs for frame type
+
+                if (frameType === IL2P_CONSTANTS.CONTROL_I_BIT) { // I-Frame
+                    controlByte = (ns << 1) | (nr << 5) | IL2P_CONSTANTS.CONTROL_I_BIT;
+                } else if (frameType === IL2P_CONSTANTS.CONTROL_S_BIT) { // S-Frame
+                    controlByte = controlByteValue | (nr << 5);
+                } else if (frameType === IL2P_CONSTANTS.CONTROL_U_BIT) { // U-Frame
+                    controlByte = controlByteValue;
+                }
+
+                if (p_f_bit) {
+                    controlByte |= IL2P_CONSTANTS.P_F_BIT_MASK;
+                }
+
+                const frameBodyParts = [addressBytes, new Uint8Array([controlByte])];
+
+                // PID is included for I-frames and specific U-frames (UI, XID, TEST, FRMR)
+                const needsPid = (frameType === IL2P_CONSTANTS.CONTROL_I_BIT) ||
+                                 (frameType === IL2P_CONSTANTS.CONTROL_U_BIT && 
+                                 [IL2P_CONSTANTS.CONTROL_UI, IL2P_CONSTANTS.CONTROL_XID, IL2P_CONSTANTS.CONTROL_TEST, IL2P_CONSTANTS.CONTROL_FRMR].includes(controlByteValue & ~IL2P_CONSTANTS.P_F_BIT_MASK)); // Mask P/F bit for comparison
+
+                if (needsPid) {
+                    frameBodyParts.push(new Uint8Array([pid]));
+                }
+                if (info && info.length > 0) {
+                    frameBodyParts.push(info);
+                }
+
+                const frameBody = new Uint8Array(frameBodyParts.reduce((acc, val) => acc.concat(Array.from(val)), []));
+                const fcs = calculateFCS(frameBody);
+                const fcsBytes = new Uint8Array([(fcs & 0xFF), (fcs >>> 8)]);
+                return new Uint8Array([IL2P_CONSTANTS.FLAG_BYTE, ...frameBody, ...fcsBytes, IL2P_CONSTANTS.FLAG_BYTE]);
+            }
+        }
+
+        class IL2PPacketDecoder {
+            decodeFrame(rawData) {
+                const frames = [];
+                let buffer = rawData;
+                while (buffer.length > 0) {
+                    const startIndex = buffer.indexOf(IL2P_CONSTANTS.FLAG_BYTE);
+                    if (startIndex === -1) break;
+                    const endIndex = buffer.indexOf(IL2P_CONSTANTS.FLAG_BYTE, startIndex + 1);
+                    if (endIndex === -1) break;
+
+                    const frameData = buffer.slice(startIndex + 1, endIndex);
+                    buffer = buffer.slice(endIndex + 1);
+                    if (frameData.length < (7 + 7 + 1 + 2)) continue; // Min size: Dest (7) + Src (7) + Control (1) + FCS (2)
+
+                    const fcsReceived = frameData[frameData.length - 2] | (frameData[frameData.length - 1] << 8);
+                    const frameForFcs = frameData.slice(0, frameData.length - 2);
+                    const isValidFCS = calculateFCS(frameForFcs) === fcsReceived;
+
+                    let offset = 0;
+                    const addresses = [];
+                    let isLastAddress = false;
+                    while (!isLastAddress && offset <= frameForFcs.length - 7) {
+                        const addressBytes = frameForFcs.slice(offset, offset + 7);
+                        const decodedAddr = decodeCallsign(addressBytes);
+                        isLastAddress = decodedAddr.isLastAddress;
+                        addresses.push(decodedAddr);
+                        offset += 7;
+                    }
+
+                    if (addresses.length < 2) continue; // Need at least source and destination
+                    const [destination, source, ...repeaters] = addresses;
+
+                    const controlByte = frameForFcs[offset++];
+                    const p_f_bit = (controlByte & IL2P_CONSTANTS.P_F_BIT_MASK) !== 0;
+                    
+                    let ns = null, nr = null, pid = null, info = null;
+
+                    const frameType = controlByte & IL2P_CONSTANTS.CONTROL_U_MASK; // Check LSBs for frame type
+
+                    if (frameType === IL2P_CONSTANTS.CONTROL_I_BIT) { // I-Frame
+                        ns = (controlByte >>> 1) & 0x07;
+                        nr = (controlByte >>> 5) & 0x07;
+                    } else if (frameType === IL2P_CONSTANTS.CONTROL_S_BIT) { // S-Frame
+                        nr = (controlByte >>> 5) & 0x07;
+                    }
+                    // For U-frames, ns and nr are not applicable in the control byte.
+
+                    // PID is included for I-frames and specific U-frames (UI, XID, TEST, FRMR)
+                    const needsPidDecode = (frameType === IL2P_CONSTANTS.CONTROL_I_BIT) ||
+                                           (frameType === IL2P_CONSTANTS.CONTROL_U_BIT && 
+                                           [IL2P_CONSTANTS.CONTROL_UI, IL2P_CONSTANTS.CONTROL_XID, IL2P_CONSTANTS.CONTROL_TEST, IL2P_CONSTANTS.CONTROL_FRMR].includes(controlByte & ~IL2P_CONSTANTS.P_F_BIT_MASK)); // Mask P/F bit for comparison
+                    
+                    if (needsPidDecode && offset < frameForFcs.length) {
+                        pid = frameForFcs[offset++];
+                    }
+                    if (offset < frameForFcs.length) {
+                        info = frameForFcs.slice(offset);
+                    }
+
+                    // Determine if it's a command or response based on the C/R bit in the destination/source address
+                    // For IL2P, the C/R bit in the destination address is 0 for commands, 1 for responses.
+                    // In the source address, it's 1 for commands, 0 for responses.
+                    const isCommand = destination.crOrHBit === 0;
+
+                    frames.push({
+                        destination: destination.callsign,
+                        destinationSsid: destination.ssid,
+                        source: source.callsign,
+                        sourceSsid: source.ssid,
+                        repeaters: repeaters.map(r => ({ callsign: r.callsign, ssid: r.ssid, hasBeenDigipeated: r.crOrHBit === 1 })),
+                        controlByte: controlByte,
+                        pid: pid,
+                        info: info,
+                        isValidFCS: isValidFCS,
+                        p_f_bit: p_f_bit,
+                        isCommand: isCommand,
+                        ns: ns,
+                        nr: nr
+                    });
+                }
+                return frames;
+            }
+        }
+
+        // --- Link State Machine for IL2P ---
+        const LinkState = {
+            DISCONNECTED: 'DISCONNECTED',
+            CONNECTING: 'CONNECTING',
+            CONNECTED: 'CONNECTED',
+            DISCONNECTING: 'DISCONNECTING',
+        };
+
+        class IL2PLink {
+            constructor(localCallsign, sendFunction, callbacks) {
+                this.localCallsign = localCallsign;
+                this.physicalLayerSend = sendFunction;
+                this.callbacks = callbacks;
+                this.encoder = new IL2PPacketEncoder();
+                this.decoder = new IL2PPacketDecoder();
+                this.state = LinkState.DISCONNECTED;
+                this.remoteCallsign = null;
+                this.V_S = 0; // Send state variable
+                this.V_R = 0; // Receive state variable
+                this.V_A = 0; // Acknowledge state variable (last acknowledged N(S))
+                this.retransmissionBuffer = [];
+                this.t1Timer = null;
+                this.retransmitCount = 0;
+                this.lastSentDiscFrame = null; // To handle DISC retransmissions
+                this.T1_TIMEOUT_MS = 3000; // Retransmission timer
+                this.N2_RETRY_COUNT = 10; // Max retransmissions
+                this.N1_MAX_BYTES = 256; // Max info field size (simplified)
+            }
+
+            log(level, message) { this.callbacks.onInternalLog?.(level, message); }
+            setState(newState) {
+                if (this.state !== newState) {
+                    const oldState = this.state;
+                    this.state = newState;
+                    this.callbacks.onStateChange?.(newState, oldState);
+                }
+            }
+            startT1Timer(frameToSend, description) {
+                this.clearT1Timer();
+                this.t1Timer = setTimeout(() => this.handleT1Timeout(frameToSend, description), this.T1_TIMEOUT_MS);
+            }
+            clearT1Timer() { if (this.t1Timer) clearTimeout(this.t1Timer); this.t1Timer = null; }
+            
+            handleT1Timeout(frame, description) {
+                this.retransmitCount++;
+                if (this.retransmitCount >= this.N2_RETRY_COUNT) {
+                    this.log('ERROR', `T1 timeout, N2 retry limit exceeded. Disconnecting.`);
+                    // Direct transition to DISCONNECTED, do not send another DISC
+                    this.setState(LinkState.DISCONNECTED);
+                    this.callbacks.onDisconnected?.(this.remoteCallsign || '', 'N2 retry limit exceeded');
+                    this.clearT1Timer();
+                    this.remoteCallsign = null;
+                    this.lastSentDiscFrame = null;
+                    return;
+                }
+                this.log('WARN', `T1 timeout. Retransmitting ${description}. Attempt ${this.retransmitCount}/${this.N2_RETRY_COUNT}.`);
+                this.physicalLayerSend(frame);
+                this.callbacks.onFrameSent?.(frame, `Retransmitting ${description}`);
+                this.startT1Timer(frame, description);
+            }
+
+            connect(destination) {
+                if (this.state !== LinkState.DISCONNECTED) return;
+                this.remoteCallsign = destination;
+                this.setState(LinkState.CONNECTING);
+                this.V_S = this.V_R = this.V_A = 0;
+                this.retransmissionBuffer = [];
+                this.retransmitCount = 0;
+                this.lastSentDiscFrame = null;
+                // Send SABM command with P-bit set
+                const sabmFrame = this.encoder.encodeFrame(destination, this.localCallsign, [], IL2P_CONSTANTS.CONTROL_SABM, 0, 0, true);
+                this.physicalLayerSend(sabmFrame);
+                this.callbacks.onFrameSent?.(sabmFrame, 'SABM (Connect Request)');
+                this.startT1Timer(sabmFrame, 'SABM');
+            }
+
+            disconnect(reason = 'User request') {
+                if (this.state === LinkState.DISCONNECTED) return;
+                this.clearT1Timer();
+                const peer = this.remoteCallsign || '';
+                this.V_S = this.V_R = this.V_A = 0;
+                this.retransmissionBuffer = [];
+                this.retransmitCount = 0;
+
+                if (this.remoteCallsign) {
+                    this.setState(LinkState.DISCONNECTING);
+                    // Send DISC command with P-bit set
+                    const discFrame = this.encoder.encodeFrame(this.remoteCallsign, this.localCallsign, [], IL2P_CONSTANTS.CONTROL_DISC, 0, 0, true);
+                    this.lastSentDiscFrame = discFrame;
+                    this.physicalLayerSend(discFrame);
+                    this.callbacks.onFrameSent?.(discFrame, 'DISC (Disconnect Request)');
+                    this.startT1Timer(discFrame, 'DISC');
+                } else {
+                    this.setState(LinkState.DISCONNECTED);
+                    this.callbacks.onDisconnected?.(peer, reason);
+                    this.lastSentDiscFrame = null;
+                }
+            }
+
+            sendIFrame(data) {
+                if (this.state !== LinkState.CONNECTED || !this.remoteCallsign) return;
+                const ns = this.V_S % 8;
+                const nr = this.V_R % 8; // N(R) is the next expected sequence number from remote
+                // I-frame is a command, P/F bit is 0 unless polling
+                const iFrameBytes = this.encoder.encodeFrame(this.remoteCallsign, this.localCallsign, [], IL2P_CONSTANTS.CONTROL_I_BIT, ns, nr, false, IL2P_CONSTANTS.PID_NO_LAYER_3, data);
+                this.physicalLayerSend(iFrameBytes);
+                this.callbacks.onFrameSent?.(iFrameBytes, `I-Frame N(S)=${ns}, N(R)=${nr}`);
+                this.retransmissionBuffer.push({ frame: iFrameBytes, ns: ns });
+                this.V_S = (this.V_S + 1) % 8;
+                this.startT1Timer(iFrameBytes, `I-Frame N(S)=${ns}`);
+            }
+
+            sendUIFrame(destination, data, repeaters = []) {
+                // UI frame is a U-frame, no sequence numbers, always a command
+                const uiFrame = this.encoder.encodeFrame(destination, this.localCallsign, repeaters, IL2P_CONSTANTS.CONTROL_UI, 0, 0, false, IL2P_CONSTANTS.PID_NO_LAYER_3, data);
+                this.physicalLayerSend(uiFrame);
+                this.callbacks.onFrameSent?.(uiFrame, `UI-Frame to ${destination}`);
+            }
+
+            sendUAFrame(destination, isCommand, p_f_bit) {
+                // UA is a U-frame response
+                const uaFrame = this.encoder.encodeFrame(destination, this.localCallsign, [], IL2P_CONSTANTS.CONTROL_UA, 0, 0, p_f_bit);
+                this.physicalLayerSend(uaFrame);
+                this.callbacks.onFrameSent?.(uaFrame, 'UA (Unnumbered Acknowledgment)');
+            }
+            
+            sendDMFrame(destination, isCommand, p_f_bit) {
+                // DM is a U-frame response
+                const dmFrame = this.encoder.encodeFrame(destination, this.localCallsign, [], IL2P_CONSTANTS.CONTROL_DM, 0, 0, p_f_bit);
+                this.physicalLayerSend(dmFrame);
+                this.callbacks.onFrameSent?.(dmFrame, 'DM (Disconnected Mode)');
+            }
+
+            sendRRFrame(destination, isCommand, p_f_bit, nr) {
+                // RR is an S-frame
+                const rrFrame = this.encoder.encodeFrame(destination, this.localCallsign, [], IL2P_CONSTANTS.CONTROL_RR, 0, nr, p_f_bit);
+                this.physicalLayerSend(rrFrame);
+                this.callbacks.onFrameSent?.(rrFrame, `RR (Receive Ready) N(R)=${nr}`);
+            }
+
+            receiveRawData(data) {
+                const frames = this.decoder.decodeFrame(data);
+                frames.forEach(frame => {
+                    this.callbacks.onFrameReceived?.(frame, data);
+                    if (!frame.isValidFCS) {
+                        this.log('ERROR', `Invalid FCS from ${frame.source}-${frame.sourceSsid}`);
+                        return;
+                    }
+
+                    const fullDest = `${frame.destination}-${frame.destinationSsid}`;
+                    const fullSource = `${frame.source}-${frame.sourceSsid}`;
+                    const isForMe = fullDest === this.localCallsign;
+                    const isBroadcastUI = (frame.controlByte & ~IL2P_CONSTANTS.P_F_BIT_MASK) === IL2P_CONSTANTS.CONTROL_UI && frame.destination === 'CQ';
+
+                    // Digipeater Logic
+                    const digipeaterIndex = frame.repeaters.findIndex(r => `${r.callsign}-${r.ssid}` === this.localCallsign && !r.hasBeenDigipeated);
+                    if (digipeaterIndex !== -1) {
+                        this.log('INFO', `Digipeating frame for ${fullDest}`);
+                        const newRepeaters = frame.repeaters.map((r, idx) => (idx === digipeaterIndex ? { ...r, hasBeenDigipeated: true } : r));
+                        // Re-encode the frame with the updated digipeater status
+                        const retransmittedFrame = this.encoder.encodeFrame(
+                            frame.destination, frame.source, newRepeaters,
+                            frame.controlByte & ~IL2P_CONSTANTS.P_F_BIT_MASK, // Clear P/F bit for retransmission
+                            frame.ns || 0, frame.nr || 0, false, // P/F bit is 0 for retransmission
+                            frame.pid, frame.info
+                        );
+                        this.physicalLayerSend(retransmittedFrame);
+                        this.callbacks.onFrameSent?.(retransmittedFrame, `Digipeated frame to ${fullDest}`);
+                        if (!isForMe) return; // Stop processing if not final destination
+                    }
+
+                    if (!isForMe && !isBroadcastUI) return;
+
+                    const controlByte = frame.controlByte;
+                    const p_f_bit = frame.p_f_bit;
+                    const isCommand = frame.isCommand;
+
+                    const frameType = controlByte & IL2P_CONSTANTS.CONTROL_U_MASK; // Check LSBs for frame type
+
+                    // State-based handling
+                    switch (this.state) {
+                        case LinkState.DISCONNECTED:
+                            if (frameType === IL2P_CONSTANTS.CONTROL_U_BIT && (controlByte & ~IL2P_CONSTANTS.P_F_BIT_MASK) === IL2P_CONSTANTS.CONTROL_SABM && isCommand) {
+                                this.remoteCallsign = fullSource;
+                                this.setState(LinkState.CONNECTED);
+                                this.V_S = this.V_R = this.V_A = 0;
+                                this.retransmissionBuffer = [];
+                                this.retransmitCount = 0;
+                                this.lastSentDiscFrame = null;
+                                this.sendUAFrame(fullSource, false, p_f_bit); // UA is a response, P/F matches received P/F
+                                this.callbacks.onConnected?.(this.remoteCallsign, null);
+                            } else if ((controlByte & ~IL2P_CONSTANTS.P_F_BIT_MASK) === IL2P_CONSTANTS.CONTROL_UI) {
+                                this.callbacks.onUIFrameReceived?.(frame.info, fullSource, fullDest, frame.repeaters);
+                            } else if (isCommand) { // Any other command in DISCONNECTED state
+                                this.sendDMFrame(fullSource, false, p_f_bit); // DM is a response
+                            }
+                            break;
+                        
+                        case LinkState.CONNECTING:
+                            if (frameType === IL2P_CONSTANTS.CONTROL_U_BIT && (controlByte & ~IL2P_CONSTANTS.P_F_BIT_MASK) === IL2P_CONSTANTS.CONTROL_UA && !isCommand && fullSource === this.remoteCallsign && p_f_bit) {
+                                // Received UA response with F-bit set
+                                this.setState(LinkState.CONNECTED);
+                                this.callbacks.onConnected?.(this.remoteCallsign, null);
+                                this.clearT1Timer();
+                            } else if (frameType === IL2P_CONSTANTS.CONTROL_U_BIT && (controlByte & ~IL2P_CONSTANTS.P_F_BIT_MASK) === IL2P_CONSTANTS.CONTROL_DM && !isCommand && fullSource === this.remoteCallsign && p_f_bit) {
+                                // Received DM response with F-bit set (connection rejected)
+                                this.disconnect("Connection rejected by peer (DM)");
+                                this.clearT1Timer();
+                            } else if (isCommand) {
+                                // Any other command while connecting, respond with DM
+                                this.sendDMFrame(fullSource, false, p_f_bit);
+                            }
+                            break;
+
+                        case LinkState.CONNECTED:
+                            if (fullSource !== this.remoteCallsign) {
+                                // Ignore frames from unexpected sources in CONNECTED state, or send DM if it's a command
+                                if (isCommand) this.sendDMFrame(fullSource, false, p_f_bit);
+                                return;
+                            }
+                            if (frameType === IL2P_CONSTANTS.CONTROL_U_BIT) {
+                                const uFrameType = controlByte & ~IL2P_CONSTANTS.P_F_BIT_MASK;
+                                if (uFrameType === IL2P_CONSTANTS.CONTROL_UI) {
+                                    this.callbacks.onUIFrameReceived?.(frame.info, fullSource, fullDest, frame.repeaters);
+                                } else if (uFrameType === IL2P_CONSTANTS.CONTROL_DISC && isCommand) {
+                                    // Peer sent DISC command while we are CONNECTED
+                                    this.sendUAFrame(fullSource, false, p_f_bit); // Send UA response with F-bit set
+                                    this.setState(LinkState.DISCONNECTED); // Immediately transition to DISCONNECTED
+                                    this.callbacks.onDisconnected?.(this.remoteCallsign, "Peer disconnected");
+                                    this.clearT1Timer();
+                                    this.remoteCallsign = null;
+                                    this.lastSentDiscFrame = null;
+                                }
+                            } else if (frameType === IL2P_CONSTANTS.CONTROL_I_BIT) {
+                                const { ns, nr } = frame;
+                                // Handle N(R) from received I-frame (piggybacked ACK)
+                                if (nr !== this.V_A) {
+                                    this.retransmissionBuffer = this.retransmissionBuffer.filter(buf => {
+                                        const isAcked = (buf.ns >= this.V_A && buf.ns < nr) || (this.V_A > nr && (buf.ns >= this.V_A || buf.ns < nr));
+                                        return !isAcked;
+                                    });
+                                    this.V_A = nr;
+                                    if (this.retransmissionBuffer.length === 0) this.clearT1Timer(); else this.startT1Timer(this.retransmissionBuffer[0].frame, `I-Frame N(S)=${this.retransmissionBuffer[0].ns}`);
+                                }
+                                // Handle N(S) from received I-frame
+                                if (ns === this.V_R) {
+                                    this.callbacks.onDataReceived?.(frame.info, fullSource);
+                                    this.V_R = (this.V_R + 1) % 8;
+                                    this.sendRRFrame(fullSource, false, false, this.V_R); // Send RR (Receive Ready)
+                                } else {
+                                    this.log('WARN', `Out-of-sequence I-Frame N(S)=${ns}. Expected ${this.V_R}. Sending RR with N(R)=${this.V_R}.`);
+                                    this.sendRRFrame(fullSource, false, false, this.V_R); // Acknowledge up to V_R
+                                }
+                            } else if (frameType === IL2P_CONSTANTS.CONTROL_S_BIT) {
+                                // Supervisory frame (RR, RNR, REJ)
+                                const sFrameType = controlByte & ~IL2P_CONSTANTS.P_F_BIT_MASK;
+                                const { nr } = frame;
+
+                                if (nr !== this.V_A) {
+                                    this.retransmissionBuffer = this.retransmissionBuffer.filter(buf => {
+                                        const isAcked = (buf.ns >= this.V_A && buf.ns < nr) || (this.V_A > nr && (buf.ns >= this.V_A || buf.ns < nr));
+                                        return !isAcked;
+                                    });
+                                    this.V_A = nr;
+                                    if (this.retransmissionBuffer.length === 0) this.clearT1Timer(); else this.startT1Timer(this.retransmissionBuffer[0].frame, `I-Frame N(S)=${this.retransmissionBuffer[0].ns}`);
+                                }
+
+                                if (sFrameType === IL2P_CONSTANTS.CONTROL_REJ) {
+                                    this.log('WARN', `Received REJ N(R)=${nr}. Retransmitting from N(R).`);
+                                    // Retransmit all unacknowledged frames starting from N(R)
+                                    this.retransmissionBuffer = this.retransmissionBuffer.filter(buf => {
+                                        const isAcked = (buf.ns >= this.V_A && buf.ns < nr) || (this.V_A > nr && (buf.ns >= this.V_A || buf.ns < nr));
+                                        return !isAcked;
+                                    });
+                                    if (this.retransmissionBuffer.length > 0) {
+                                        this.physicalLayerSend(this.retransmissionBuffer[0].frame);
+                                        this.callbacks.onFrameSent?.(this.retransmissionBuffer[0].frame, `Retransmitting I-frame N(S)=${this.retransmissionBuffer[0].ns} due to REJ`);
+                                        this.startT1Timer(this.retransmissionBuffer[0].frame, `I-Frame N(S)=${this.retransmissionBuffer[0].ns}`);
+                                    }
+                                }
+                                // Other S-frame types (RR, RNR) implicitly handle ACKs via N(R)
+                            }
+                            break;
+
+                        case LinkState.DISCONNECTING:
+                            if (frameType === IL2P_CONSTANTS.CONTROL_U_BIT && (controlByte & ~IL2P_CONSTANTS.P_F_BIT_MASK) === IL2P_CONSTANTS.CONTROL_UA && !isCommand && fullSource === this.remoteCallsign && p_f_bit) {
+                                // Received UA response with F-bit set
+                                this.setState(LinkState.DISCONNECTED);
+                                this.callbacks.onDisconnected?.(this.remoteCallsign, "Disconnected by peer");
+                                this.clearT1Timer();
+                                this.remoteCallsign = null;
+                                this.lastSentDiscFrame = null;
+                            } else if (isCommand) {
+                                // Any other command while disconnecting, respond with DM
+                                this.sendDMFrame(fullSource, false, p_f_bit);
+                            }
+                            break;
+                    }
+                });
+            }
+        }
+
+        // --- Main Application Logic ---
+        const nodes = {};
+        const nodeCallsigns = ['NODEA-1', 'NODEB-1', 'NODEC-1'];
+        const networkDecoder = new IL2PPacketDecoder(); // Use IL2P decoder for network traffic
+
+        function displayStatusMessage(message) {
+            const box = document.getElementById('status-message-box');
+            const text = document.getElementById('status-message-text');
+            text.textContent = message;
+            box.classList.add('show');
+            setTimeout(() => box.classList.remove('show'), 3000);
+        }
+
+        function handleNetworkSend(frameBytes) {
+            const decodedFrames = networkDecoder.decodeFrame(frameBytes);
+            if (decodedFrames.length === 0) {
+                console.warn("Could not decode frame for network send.");
+                return;
+            }
+            const frame = decodedFrames[0];
+            const destinationCallsign = `${frame.destination}-${frame.destinationSsid}`;
+
+            const isBroadcast = (frame.controlByte & ~IL2P_CONSTANTS.P_F_BIT_MASK) === IL2P_CONSTANTS.CONTROL_UI && frame.destination === 'CQ';
+            const hasDigipeaterPath = frame.repeaters.length > 0;
+
+            // Simulate physical layer delay
+            setTimeout(() => {
+                if (isBroadcast || hasDigipeaterPath) {
+                    // Broadcast to all nodes if it's a CQ call or uses a digipeater path
+                    Object.values(nodes).forEach(node => node.link.receiveRawData(frameBytes));
+                } else {
+                    // Point-to-point, send only to the specific destination
+                    if (nodes[destinationCallsign]) {
+                        nodes[destinationCallsign].link.receiveRawData(frameBytes);
+                    } else {
+                        console.warn(`Frame sent to unknown destination: ${destinationCallsign}`);
+                    }
+                }
+            }, 50 + Math.random() * 50);
+        }
+
+        function createNodeUI(nodeId, callsign) {
+            const panel = document.getElementById(nodeId);
+            panel.innerHTML = `
+                <div class="flex justify-between items-start mb-2">
+                    <h2 class="text-xl font-bold text-gray-800">Node ${callsign}</h2>
+                    <p class="font-semibold text-lg"><span id="${callsign}-status" class="status-disconnected">DISCONNECTED</span></p>
+                </div>
+                <p id="${callsign}-peer" class="text-sm text-gray-600 mb-3 h-5"></p>
+                <div class="flex items-center gap-2 mb-4">
+                    <select id="${callsign}-connect-target" class="flex-grow p-2 border border-gray-300 rounded-md shadow-sm"></select>
+                    <button id="${callsign}-connect-btn" class="btn btn-primary">Connect</button>
+                    <button id="${callsign}-disconnect-btn" class="btn btn-danger">Disconnect</button>
+                </div>
+                <h3 class="text-md font-semibold text-gray-700 mb-2 border-t pt-2">Logs</h3>
+                <div id="${callsign}-logs" class="h-48 overflow-y-auto bg-gray-50 p-2 border rounded-md text-xs"></div>
+            `;
+        }
+        
+        function updateNodeUI(callsign, link) {
+            const statusEl = document.getElementById(`${callsign}-status`);
+            const peerEl = document.getElementById(`${callsign}-peer`);
+            const connectBtn = document.getElementById(`${callsign}-connect-btn`);
+            const disconnectBtn = document.getElementById(`${callsign}-disconnect-btn`);
+            const connectTargetEl = document.getElementById(`${callsign}-connect-target`);
+
+            statusEl.textContent = link.state;
+            statusEl.className = `status-${link.state.toLowerCase()}`;
+            peerEl.textContent = link.state === 'CONNECTED' ? `Connected to: ${link.remoteCallsign}` : '';
+            connectBtn.disabled = link.state !== 'DISCONNECTED';
+            disconnectBtn.disabled = link.state === 'DISCONNECTED';
+            connectTargetEl.disabled = link.state !== 'DISCONNECTED';
+        }
+
+        function addLogMessage(callsign, level, text) {
+            const logsEl = document.getElementById(`${callsign}-logs`);
+            const p = document.createElement('p');
+            p.className = `log-message-${level.toLowerCase()}`;
+            p.textContent = `[${level}] ${text}`;
+            logsEl.appendChild(p);
+            logsEl.scrollTop = logsEl.scrollHeight;
+        }
+        
+        nodeCallsigns.forEach(callsign => {
+            const nodeId = `node-${callsign.charAt(4).toLowerCase()}-panel`;
+            createNodeUI(nodeId, callsign);
+
+            const link = new IL2PLink(callsign, handleNetworkSend, {
+                onStateChange: () => updateNodeUI(callsign, link),
+                onDataReceived: (data, src) => addLogMessage(callsign, 'INFO', `I-Frame from ${src}: ${new TextDecoder().decode(data)}`),
+                onUIFrameReceived: (data, src, dest, rpt) => addLogMessage(callsign, 'UI', `UI from ${src} to ${dest}: ${new TextDecoder().decode(data)}`),
+                onConnected: (peer) => {
+                    addLogMessage(callsign, 'SYSTEM', `Connected to ${peer}`);
+                    updateNodeUI(callsign, link);
+                },
+                onDisconnected: (peer, reason) => {
+                    addLogMessage(callsign, 'SYSTEM', `Disconnected from ${peer}. Reason: ${reason}`);
+                    updateNodeUI(callsign, link);
+                },
+                onError: (err) => addLogMessage(callsign, 'ERROR', err.message),
+                onFrameSent: (bytes, desc) => {
+                    addLogMessage(callsign, 'DEBUG', `SENT: ${desc}`);
+                    console.log(`[${callsign}] SENT: ${desc} | Hex: ${bytesToHex(bytes)}`);
+                },
+                onFrameReceived: (frame, raw) => {
+                    addLogMessage(callsign, 'DEBUG', `RECV: ${frame.source}-${frame.sourceSsid} -> ${frame.destination}-${frame.destinationSsid}`);
+                    console.log(`[${callsign}] RECV: ${frame.source}-${frame.sourceSsid} -> ${frame.destination}-${frame.destinationSsid} | Hex: ${bytesToHex(raw)}`);
+                },
+                onInternalLog: (level, msg) => addLogMessage(callsign, level, msg),
+            });
+            nodes[callsign] = { link, panelId: nodeId };
+            
+            // Populate connect dropdown
+            const connectTargetEl = document.getElementById(`${callsign}-connect-target`);
+            nodeCallsigns.filter(c => c !== callsign).forEach(c => {
+                const option = document.createElement('option');
+                option.value = c;
+                option.textContent = c;
+                connectTargetEl.appendChild(option);
+            });
+
+            // Add event listeners
+            document.getElementById(`${callsign}-connect-btn`).addEventListener('click', () => {
+                const target = connectTargetEl.value;
+                link.connect(target);
+            });
+            document.getElementById(`${callsign}-disconnect-btn`).addEventListener('click', () => link.disconnect());
+            
+            updateNodeUI(callsign, link);
+        });
+
+        // Setup Universal Sender
+        const senderSelect = document.getElementById('sender-select');
+        const iframeDestSelect = document.getElementById('iframe-dest-select');
+        const uiframeDestSelect = document.getElementById('uiframe-dest-select');
+        const digipeaterSelect = document.getElementById('digipeater-select');
+        const messageInput = document.getElementById('message-to-send');
+        const sendIBtn = document.getElementById('send-i-btn');
+        const sendUIBtn = document.getElementById('send-ui-btn');
+
+        function updateSenderOptions() {
+            const sender = senderSelect.value;
+            
+            // Update I-Frame destinations
+            iframeDestSelect.innerHTML = '';
+            nodeCallsigns.filter(c => c !== sender).forEach(c => {
+                const option = document.createElement('option');
+                option.value = c;
+                option.textContent = c;
+                iframeDestSelect.appendChild(option);
+            });
+
+            // Update UI-Frame destinations and digipeaters
+            updateUIDestOptions();
+        }
+
+        function updateUIDestOptions() {
+            const sender = senderSelect.value;
+            const uiDest = uiframeDestSelect.value;
+            
+            uiframeDestSelect.innerHTML = '';
+            nodeCallsigns.filter(c => c !== sender).forEach(c => {
+                const option = document.createElement('option');
+                option.value = c;
+                option.textContent = c;
+                uiframeDestSelect.appendChild(option);
+            });
+            if (uiDest && uiDest !== sender) uiframeDestSelect.value = uiDest;
+
+            const currentUIDest = uiframeDestSelect.value;
+            digipeaterSelect.innerHTML = '<option value="">NONE</option>';
+            nodeCallsigns.filter(c => c !== sender && c !== currentUIDest).forEach(c => {
+                const option = document.createElement('option');
+                option.value = c;
+                option.textContent = c;
+                digipeaterSelect.appendChild(option);
+            });
+        }
+
+        nodeCallsigns.forEach(c => {
+            const option = document.createElement('option');
+            option.value = c;
+            option.textContent = c;
+            senderSelect.appendChild(option);
+        });
+        
+        senderSelect.addEventListener('change', updateSenderOptions);
+        uiframeDestSelect.addEventListener('change', updateUIDestOptions);
+        
+        sendIBtn.addEventListener('click', () => {
+            const sender = senderSelect.value;
+            const dest = iframeDestSelect.value;
+            const message = messageInput.value;
+            const node = nodes[sender].link;
+            if (node.state === 'CONNECTED' && node.remoteCallsign === dest) {
+                node.sendIFrame(new TextEncoder().encode(message));
+                messageInput.value = '';
+            } else {
+                displayStatusMessage(`Error: ${sender} is not connected to ${dest}.`);
+            }
+        });
+
+        sendUIBtn.addEventListener('click', () => {
+            const sender = senderSelect.value;
+            const dest = uiframeDestSelect.value;
+            const digi = digipeaterSelect.value;
+            const message = messageInput.value;
+            const node = nodes[sender].link;
+            const repeaters = digi ? [{ callsign: digi.split('-')[0], ssid: parseInt(digi.split('-')[1] || '0'), hasBeenDigipeated: false }] : [];
+            node.sendUIFrame(dest, new TextEncoder().encode(message), repeaters);
+            messageInput.value = '';
+        });
+
+        // Initial setup
+        updateSenderOptions();
+
+    </script>
+</body>
+</html>
