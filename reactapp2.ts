@@ -432,6 +432,7 @@ function useAx25Link(
 ) {
     const [connectionStatus, setConnectionStatus] = useState<LinkState>(LinkState.DISCONNECTED);
     const [messages, setMessages] = useState<{ id: number; text: string; type: 'info' | 'ui' | 'error' | 'system' }[]>([]);
+    const [peerCallsign, setPeerCallsign] = useState<string | null>(null); // New state for connected peer
     const linkRef = useRef<AX25Link | null>(null);
 
     const addMessage = useCallback((text: string, type: 'info' | 'ui' | 'error' | 'system') => {
@@ -469,8 +470,14 @@ function useAx25Link(
                 const repeatersStr = repeaters.map(r => r.callsign + (r.hasBeenDigipeated ? '*' : '')).join(',');
                 addMessage(`RECV UI-Frame from ${src} to ${dest}${repeatersStr ? ` via ${repeatersStr}` : ''}: ${new TextDecoder().decode(data)}`, 'ui');
             },
-            onConnected: (peer) => addMessage(`Connected to ${peer}`, 'system'),
-            onDisconnected: (peer, reason) => addMessage(`Disconnected from ${peer}. Reason: ${reason}`, 'system'),
+            onConnected: (peer) => {
+                setPeerCallsign(peer); // Set peer callsign on connection
+                addMessage(`Connected to ${peer}`, 'system');
+            },
+            onDisconnected: (peer, reason) => {
+                setPeerCallsign(null); // Clear peer callsign on disconnection
+                addMessage(`Disconnected from ${peer}. Reason: ${reason}`, 'system');
+            },
             onError: (error) => addMessage(`ERROR: ${error.message}`, 'error'), // Only actual errors here
             onFrameSent: (frameBytes, description) => internalLog('DEBUG', `SENT: ${description} [${Array.from(frameBytes).map(b => b.toString(16).padStart(2, '0')).join(' ')}]`),
             onFrameReceived: (frame, rawData) => internalLog('DEBUG', `RECEIVED: ${JSON.stringify(frame)} [${Array.from(rawData).map(b => b.toString(16).padStart(2, '0')).join(' ')}]`),
@@ -489,7 +496,7 @@ function useAx25Link(
     const sendUIFrame = useCallback((dest: string, data: string) => linkRef.current?.sendUIFrame(dest, new TextEncoder().encode(data)), []);
     const receiveRawData = useCallback((data: Uint8Array) => linkRef.current?.receiveRawData(data), []);
 
-    return { connectionStatus, messages, connect, disconnect, sendIFrame, sendUIFrame, receiveRawData };
+    return { connectionStatus, messages, connect, disconnect, sendIFrame, sendUIFrame, receiveRawData, localCallsign, peerCallsign };
 }
 
 class AX25Link {
@@ -970,99 +977,215 @@ class AX25Link {
 function App() {
     const nodeARef = useRef<any>(null);
     const nodeBRef = useRef<any>(null);
+    const nodeCRef = useRef<any>(null); // New Node C ref
 
-    const sendToNodeA = useCallback((frame: Uint8Array) => {
-        // Simulate physical layer delay and potential loss
-        setTimeout(() => {
-            // Optional: Simulate frame loss for testing
-            // if (Math.random() < 0.1) {
-            //     console.log("Simulating packet loss to Node A");
-            //     return;
-            // }
-            nodeARef.current?.receiveRawData(frame);
-        }, 50 + Math.random() * 50); // Add some jitter
+    const [statusMessage, setStatusMessage] = useState('');
+    const [showMessage, setShowMessage] = useState(false);
+
+    const displayStatusMessage = useCallback((message: string) => {
+        setStatusMessage(message);
+        setShowMessage(true);
+        const timer = setTimeout(() => {
+            setShowMessage(false);
+            setStatusMessage('');
+        }, 5000); // Message fades after 5 seconds
+        return () => clearTimeout(timer); // Cleanup on re-render or unmount
     }, []);
 
-    const sendToNodeB = useCallback((frame: Uint8Array) => {
+
+    // Centralized network send function
+    const handleNetworkSend = useCallback((frameBytes: Uint8Array) => {
+        const decoder = new AX25Decoder(); // Create a new decoder instance for each use
+        const decodedFrames = decoder.decodeFrame(frameBytes);
+        if (decodedFrames.length === 0) {
+            console.warn("Could not decode frame for network send.");
+            return;
+        }
+        const destinationCallsignWithSSID = `${decodedFrames[0].destination.callsign}-${decodedFrames[0].destination.ssid}`;
+
         // Simulate physical layer delay and potential loss
         setTimeout(() => {
-            // Optional: Simulate frame loss for testing
-            // if (Math.random() < 0.1) {
-            //     console.log("Simulating packet loss to Node B");
-            //     return;
-            // }
-            nodeBRef.current?.receiveRawData(frame);
-        }, 50 + Math.random() * 50); // Add some jitter
-    }, []);
+            if (destinationCallsignWithSSID === 'NODEA-1' && nodeARef.current) {
+                nodeARef.current.receiveRawData(frameBytes);
+            } else if (destinationCallsignWithSSID === 'NODEB-1' && nodeBRef.current) {
+                nodeBRef.current.receiveRawData(frameBytes);
+            } else if (destinationCallsignWithSSID === 'NODEC-1' && nodeCRef.current) { // Route to Node C
+                nodeCRef.current.receiveRawData(frameBytes);
+            } else {
+                console.warn(`Frame sent to unknown destination: ${destinationCallsignWithSSID}`);
+            }
+        }, 50 + Math.random() * 50);
+    }, []); // Dependencies: nodeARef, nodeBRef, nodeCRef (implicitly captured by useCallback)
 
-    const nodeA = useAx25Link('NODEA-1', sendToNodeB, 'DEBUG');
-    const nodeB = useAx25Link('NODEB-1', sendToNodeA, 'DEBUG');
+    const nodeA = useAx25Link('NODEA-1', handleNetworkSend, 'DEBUG');
+    const nodeB = useAx25Link('NODEB-1', handleNetworkSend, 'DEBUG');
+    const nodeC = useAx25Link('NODEC-1', handleNetworkSend, 'DEBUG'); // New Node C instance
 
     useEffect(() => {
         nodeARef.current = nodeA;
         nodeBRef.current = nodeB;
+        nodeCRef.current = nodeC; // Set Node C ref
     });
 
-    const [iMessage, setIMessage] = useState('');
-    const [uiMessage, setUiMessage] = useState('');
-    const [uiDest, setUiDest] = useState('NODEB-1'); // Changed default UI destination to NODEB-1
+    const [messageToSend, setMessageToSend] = useState('');
+    const [selectedSender, setSelectedSender] = useState('NODEA-1');
+    const [selectedIFrameDest, setSelectedIFrameDest] = useState('NODEB-1');
+    const [selectedUIFrameDest, setSelectedUIFrameDest] = useState('NODEB-1');
+
+    // Helper to get node instance by callsign
+    const getNodeByCallsign = useCallback((callsign: string) => {
+        switch (callsign) {
+            case 'NODEA-1': return nodeA;
+            case 'NODEB-1': return nodeB;
+            case 'NODEC-1': return nodeC;
+            default: return null;
+        }
+    }, [nodeA, nodeB, nodeC]);
 
     const handleSendI = () => {
-        if (iMessage) {
-            nodeA.sendIFrame(iMessage);
-            setIMessage('');
+        if (messageToSend) {
+            const senderNode = getNodeByCallsign(selectedSender);
+            if (senderNode) {
+                // To send an I-frame, the sender must be connected to the destination.
+                // The AX25Link instance manages its own remoteCallsign for connected mode.
+                // So, we just tell the sender to send, and it will use its established connection.
+                // This means the 'Connect' button for the sender must have been used with the selectedIFrameDest.
+                if (senderNode.connectionStatus === 'CONNECTED' && senderNode.peerCallsign === selectedIFrameDest) {
+                    senderNode.sendIFrame(messageToSend);
+                    setMessageToSend('');
+                } else {
+                    displayStatusMessage(`Node ${selectedSender} is not connected to ${selectedIFrameDest} for I-Frame transmission. Please connect first.`);
+                }
+            } else {
+                displayStatusMessage(`Invalid sender node selected: ${selectedSender}`);
+            }
+        } else {
+            displayStatusMessage("Message cannot be empty.");
         }
     };
 
     const handleSendUI = () => {
-        if (uiMessage) {
-            nodeA.sendUIFrame(uiDest, uiMessage);
-            setUiMessage('');
+        if (messageToSend) {
+            const senderNode = getNodeByCallsign(selectedSender);
+            if (senderNode) {
+                senderNode.sendUIFrame(selectedUIFrameDest, messageToSend);
+                setMessageToSend('');
+            } else {
+                displayStatusMessage(`Invalid sender node selected: ${selectedSender}`);
+            }
+        } else {
+            displayStatusMessage("Message cannot be empty.");
         }
     };
 
+    // Options for sender and destination dropdowns
+    const nodeOptions = ['NODEA-1', 'NODEB-1', 'NODEC-1'];
+
     return (
-        <div style={{ display: 'flex', fontFamily: 'monospace', gap: '20px', padding: '20px' }}>
+        <div style={{ display: 'flex', fontFamily: 'monospace', gap: '20px', padding: '20px', flexWrap: 'wrap' }}>
+            {/* Status Message Box */}
+            {showMessage && (
+                <div style={{
+                    position: 'fixed',
+                    top: '20px',
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    backgroundColor: '#ffc107',
+                    color: '#333',
+                    padding: '10px 20px',
+                    borderRadius: '5px',
+                    boxShadow: '0 2px 10px rgba(0,0,0,0.2)',
+                    zIndex: 1000,
+                    opacity: showMessage ? 1 : 0,
+                    transition: 'opacity 0.5s ease-in-out',
+                }}>
+                    {statusMessage}
+                </div>
+            )}
+
             {/* Node A */}
-            <div style={{ flex: 1, border: '1px solid #ccc', padding: '10px', borderRadius: '5px' }}>
-                <h1>Node A (NODEA-1)</h1>
-                <p>Status: <strong style={{ color: nodeA.connectionStatus === 'CONNECTED' ? 'green' : 'orange' }}>{nodeA.connectionStatus}</strong></p>
-                <div>
-                    <button onClick={() => nodeA.connect('NODEB-1')} disabled={nodeA.connectionStatus !== 'DISCONNECTED'}>Connect to NODEB-1</button>
-                    <button onClick={() => nodeA.disconnect()} disabled={nodeA.connectionStatus === 'DISCONNECTED'}>Disconnect</button>
-                </div>
-                <hr />
-                <div>
-                    <h3>Connected Mode (I-Frame)</h3>
-                    <textarea value={iMessage} onChange={(e) => setIMessage(e.target.value)} rows={2} style={{ width: '95%' }} placeholder="Send I-Frame..."></textarea>
-                    <button onClick={handleSendI} disabled={nodeA.connectionStatus !== 'CONNECTED'}>Send</button>
-                </div>
-                <hr />
-                <div>
-                    <h3>Connectionless (UI-Frame)</h3>
-                    <input value={uiDest} onChange={(e) => setUiDest(e.target.value)} placeholder="Destination" />
-                    <textarea value={uiMessage} onChange={(e) => setUiMessage(e.target.value)} rows={2} style={{ width: '95%' }} placeholder="Send UI-Frame..."></textarea>
-                    <button onClick={handleSendUI}>Send UI</button>
-                </div>
-                <hr />
-                <h3>Logs</h3>
-                <div style={{ height: '300px', overflowY: 'scroll', background: '#f9f9f9', padding: '5px', border: '1px solid #eee' }}>
-                    {nodeA.messages.map(msg => (
-                        <p key={msg.id} style={{ margin: '2px 0', color: msg.type === 'error' ? 'red' : (msg.type === 'system' ? 'blue' : 'inherit') }}>{msg.text}</p>
-                    ))}
-                </div>
-            </div>
+            <NodePanel node={nodeA} connectOptions={nodeOptions.filter(opt => opt !== nodeA.localCallsign)} />
 
             {/* Node B */}
-            <div style={{ flex: 1, border: '1px solid #ccc', padding: '10px', borderRadius: '5px' }}>
-                <h1>Node B (NODEB-1)</h1>
-                <p>Status: <strong style={{ color: nodeB.connectionStatus === 'CONNECTED' ? 'green' : 'orange' }}>{nodeB.connectionStatus}</strong></p>
-                <h3>Logs</h3>
-                <div style={{ height: '500px', overflowY: 'scroll', background: '#f9f9f9', padding: '5px', border: '1px solid #eee' }}>
-                    {nodeB.messages.map(msg => (
-                        <p key={msg.id} style={{ margin: '2px 0', color: msg.type === 'error' ? 'red' : (msg.type === 'system' ? 'blue' : 'inherit') }}>{msg.text}</p>
-                    ))}
+            <NodePanel node={nodeB} connectOptions={nodeOptions.filter(opt => opt !== nodeB.localCallsign)} />
+
+            {/* Node C */}
+            <NodePanel node={nodeC} connectOptions={nodeOptions.filter(opt => opt !== nodeC.localCallsign)} />
+
+            {/* Universal Send Message Section */}
+            <div style={{ flex: '1 1 100%', border: '1px solid #ccc', padding: '15px', borderRadius: '5px', marginTop: '20px', background: '#e8f5e9' }}>
+                <h2>Send Message</h2>
+                <div style={{ marginBottom: '10px' }}>
+                    <label htmlFor="sender-select" style={{ marginRight: '10px' }}>Sending Node (Source):</label>
+                    <select id="sender-select" value={selectedSender} onChange={(e) => setSelectedSender(e.target.value)} style={{ padding: '5px', borderRadius: '3px' }}>
+                        {nodeOptions.map(node => (
+                            <option key={node} value={node}>{node}</option>
+                        ))}
+                    </select>
                 </div>
+                <div style={{ marginBottom: '10px' }}>
+                    <label htmlFor="iframe-dest-select" style={{ marginRight: '10px' }}>I-Frame Destination (Connected Mode):</label>
+                    <select id="iframe-dest-select" value={selectedIFrameDest} onChange={(e) => setSelectedIFrameDest(e.target.value)} style={{ padding: '5px', borderRadius: '3px' }}>
+                        {nodeOptions.filter(opt => opt !== selectedSender).map(node => (
+                            <option key={node} value={node}>{node}</option>
+                        ))}
+                    </select>
+                </div>
+                <div style={{ marginBottom: '10px' }}>
+                    <label htmlFor="uiframe-dest-select" style={{ marginRight: '10px' }}>UI-Frame Destination (Connectionless):</label>
+                    <select id="uiframe-dest-select" value={selectedUIFrameDest} onChange={(e) => setSelectedUIFrameDest(e.target.value)} style={{ padding: '5px', borderRadius: '3px' }}>
+                        {nodeOptions.filter(opt => opt !== selectedSender).map(node => (
+                            <option key={node} value={node}>{node}</option>
+                        ))}
+                    </select>
+                </div>
+                <textarea
+                    value={messageToSend}
+                    onChange={(e) => setMessageToSend(e.target.value)}
+                    rows={3}
+                    style={{ width: '95%', padding: '8px', borderRadius: '4px', border: '1px solid #ddd', marginBottom: '10px' }}
+                    placeholder="Enter message to send..."
+                ></textarea>
+                <div>
+                    <button onClick={handleSendI} style={{ padding: '8px 15px', marginRight: '10px', backgroundColor: '#4CAF50', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Send I-Frame</button>
+                    <button onClick={handleSendUI} style={{ padding: '8px 15px', backgroundColor: '#008CBA', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Send UI-Frame</button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// NodePanel Component for reusable UI
+function NodePanel({ node, connectOptions }: { node: ReturnType<typeof useAx25Link>, connectOptions: string[] }) {
+    const [connectTarget, setConnectTarget] = useState(connectOptions[0] || '');
+
+    useEffect(() => {
+        if (!connectOptions.includes(connectTarget) && connectOptions.length > 0) {
+            setConnectTarget(connectOptions[0]);
+        }
+    }, [connectOptions, connectTarget]);
+
+    return (
+        <div style={{ flex: '1 1 30%', minWidth: '300px', border: '1px solid #ccc', padding: '10px', borderRadius: '5px', display: 'flex', flexDirection: 'column' }}>
+            <h1>Node {node.localCallsign}</h1>
+            <p>Status: <strong style={{ color: node.connectionStatus === 'CONNECTED' ? 'green' : (node.connectionStatus === 'DISCONNECTED' ? 'red' : 'orange') }}>{node.connectionStatus}</strong></p>
+            {node.connectionStatus === 'CONNECTED' && node.peerCallsign && (
+                <p>Connected to: <strong>{node.peerCallsign}</strong></p>
+            )}
+            <div style={{ marginBottom: '10px' }}>
+                <select value={connectTarget} onChange={(e) => setConnectTarget(e.target.value)} disabled={node.connectionStatus !== 'DISCONNECTED'} style={{ padding: '5px', borderRadius: '3px', marginRight: '5px' }}>
+                    {connectOptions.map(opt => (
+                        <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                </select>
+                <button onClick={() => node.connect(connectTarget)} disabled={node.connectionStatus !== 'DISCONNECTED' || !connectTarget} style={{ padding: '8px 15px', backgroundColor: '#2196F3', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', marginRight: '5px' }}>Connect</button>
+                <button onClick={() => node.disconnect()} disabled={node.connectionStatus === 'DISCONNECTED'} style={{ padding: '8px 15px', backgroundColor: '#f44336', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Disconnect</button>
+            </div>
+            <h3>Logs</h3>
+            <div style={{ flexGrow: 1, height: '200px', overflowY: 'scroll', background: '#f9f9f9', padding: '5px', border: '1px solid #eee', borderRadius: '4px' }}>
+                {node.messages.map(msg => (
+                    <p key={msg.id} style={{ margin: '2px 0', fontSize: '0.85em', color: msg.type === 'error' ? 'red' : (msg.type === 'system' ? 'blue' : 'inherit') }}>{msg.text}</p>
+                ))}
             </div>
         </div>
     );
