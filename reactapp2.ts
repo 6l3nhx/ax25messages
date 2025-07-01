@@ -198,7 +198,7 @@ class AX25Encoder {
     public encodeFrame(
         destination: string,
         source: string,
-        repeaters: string[],
+        repeaters: AX25Address[], // Changed to AX25Address[] to preserve H-bit
         control: Uint8Array,
         pid: number | null,
         info: Uint8Array | null,
@@ -221,8 +221,8 @@ class AX25Encoder {
         repeaters.forEach((repeater, index) => {
             const repeaterIsLast = (index === repeaters.length - 1);
             // For digipeaters, bit 7 is the H bit, not C/R.
-            const hasBeenDigipeated = false; // This should be managed by the digipeater logic itself
-            addressFields.push(encodeCallsign(repeater, repeaterIsLast, false, true, hasBeenDigipeated));
+            // Pass the hasBeenDigipeated status directly from the repeater object
+            addressFields.push(encodeCallsign(repeater.callsign, repeaterIsLast, false, true, repeater.hasBeenDigipeated || false));
         });
 
         // Concatenate all address bytes
@@ -493,7 +493,7 @@ function useAx25Link(
     const connect = useCallback((destination: string) => linkRef.current?.connect(destination), []);
     const disconnect = useCallback(() => linkRef.current?.disconnect(), []);
     const sendIFrame = useCallback((data: string) => linkRef.current?.sendIFrame(new TextEncoder().encode(data)), []);
-    const sendUIFrame = useCallback((dest: string, data: string) => linkRef.current?.sendUIFrame(dest, new TextEncoder().encode(data)), []);
+    const sendUIFrame = useCallback((dest: string, data: string, repeaters: AX25Address[]) => linkRef.current?.sendUIFrame(dest, new TextEncoder().encode(data), repeaters), []);
     const receiveRawData = useCallback((data: Uint8Array) => linkRef.current?.receiveRawData(data), []);
 
     return { connectionStatus, messages, connect, disconnect, sendIFrame, sendUIFrame, receiveRawData, localCallsign, peerCallsign };
@@ -670,10 +670,11 @@ class AX25Link {
         }
     }
 
-    sendUIFrame(destination: string, data: Uint8Array) {
-        const uiFrame = this.encoder.encodeFrame(destination, this.localCallsign, [], new Uint8Array([AX25_CONSTANTS.CONTROL_UI]), AX25_CONSTANTS.PID_NO_LAYER_3, data, true, false);
+    // Updated sendUIFrame to accept repeaters
+    sendUIFrame(destination: string, data: Uint8Array, repeaters: AX25Address[] = []) {
+        const uiFrame = this.encoder.encodeFrame(destination, this.localCallsign, repeaters, new Uint8Array([AX25_CONSTANTS.CONTROL_UI]), AX25_CONSTANTS.PID_NO_LAYER_3, data, true, false);
         this.physicalLayerSend(uiFrame);
-        this.callbacks.onFrameSent?.(uiFrame, 'UI-Frame (Unnumbered Information)');
+        this.callbacks.onFrameSent?.(uiFrame, `UI-Frame (Unnumbered Information) to ${destination}${repeaters.length > 0 ? ' via ' + repeaters.map(r => r.callsign).join(',') : ''}`);
     }
 
     private sendUAFrame(destination: string, isCommand: boolean, p_f_bit: boolean) {
@@ -722,9 +723,59 @@ class AX25Link {
             const isBroadcastUI = frame.control[0] === AX25_CONSTANTS.CONTROL_UI &&
                                   (frame.destination.callsign === 'CQ' || isAddressedToMe);
 
+            // --- Digipeater Logic ---
+            let wasDigipeated = false;
+            let digipeaterIndex = -1;
+
+            // Find if this node is in the repeater path and hasn't digipeated yet
+            for (let i = 0; i < frame.repeaters.length; i++) {
+                const repeater = frame.repeaters[i];
+                // Check if the repeater's full callsign (with SSID) matches this node's local callsign
+                if (`${repeater.callsign}-${repeater.ssid}` === this.localCallsign && !repeater.hasBeenDigipeated) {
+                    digipeaterIndex = i;
+                    break;
+                }
+            }
+
+            if (digipeaterIndex !== -1) {
+                // This node is a digipeater for this frame and hasn't repeated it yet.
+                this.log('INFO', `Acting as digipeater for frame to ${fullDestinationCallsign} via ${frame.repeaters.map(r => r.callsign + (r.hasBeenDigipeated ? '*' : '')).join(',')}.`);
+
+                // Create a new repeaters array with the H-bit set for this digipeater
+                const repeatersForRetransmission = frame.repeaters.map((r, idx) => {
+                    if (idx === digipeaterIndex) {
+                        return { ...r, hasBeenDigipeated: true };
+                    }
+                    return r;
+                });
+
+                // Re-encode and retransmit the frame
+                const retransmittedFrame = this.encoder.encodeFrame(
+                    frame.destination.callsign,
+                    frame.source.callsign,
+                    repeatersForRetransmission, // Pass the modified AX25Address[]
+                    frame.control,
+                    frame.pid,
+                    frame.info,
+                    frame.isCommand,
+                    frame.p_f_bit,
+                    frame.isExtended
+                );
+                this.physicalLayerSend(retransmittedFrame);
+                this.callbacks.onFrameSent?.(retransmittedFrame, `Digipeated frame to ${fullDestinationCallsign}`);
+                wasDigipeated = true;
+            }
+
+            // If the frame was digipeated AND it's not for this node, then stop processing it further.
+            // If it was digipeated AND it IS for this node (i.e., this node is the final destination),
+            // then continue processing it as a normal received frame.
+            if (wasDigipeated && !isAddressedToMe) {
+                return;
+            }
+
+
             if (!isAddressedToMe && !isBroadcastUI) {
                 this.log('DEBUG', `Received frame not addressed to ${this.localCallsign}: Dest ${fullDestinationCallsign}`);
-                // Future: implement digipeater functionality here
                 return;
             }
 
@@ -1031,6 +1082,7 @@ function App() {
     const [selectedSender, setSelectedSender] = useState('NODEA-1');
     const [selectedIFrameDest, setSelectedIFrameDest] = useState('NODEB-1');
     const [selectedUIFrameDest, setSelectedUIFrameDest] = useState('NODEB-1');
+    const [selectedDigipeater, setSelectedDigipeater] = useState(''); // New state for digipeater
 
     // Helper to get node instance by callsign
     const getNodeByCallsign = useCallback((callsign: string) => {
@@ -1068,7 +1120,12 @@ function App() {
         if (messageToSend) {
             const senderNode = getNodeByCallsign(selectedSender);
             if (senderNode) {
-                senderNode.sendUIFrame(selectedUIFrameDest, messageToSend);
+                let repeaters: AX25Address[] = [];
+                if (selectedDigipeater && selectedDigipeater !== 'NONE') {
+                    // Assuming SSID 0 for simplicity for digipeaters in UI
+                    repeaters.push({ callsign: selectedDigipeater.split('-')[0], ssid: parseInt(selectedDigipeater.split('-')[1] || '0'), hasBeenDigipeated: false });
+                }
+                senderNode.sendUIFrame(selectedUIFrameDest, messageToSend, repeaters);
                 setMessageToSend('');
             } else {
                 displayStatusMessage(`Invalid sender node selected: ${selectedSender}`);
@@ -1080,6 +1137,24 @@ function App() {
 
     // Options for sender and destination dropdowns
     const nodeOptions = ['NODEA-1', 'NODEB-1', 'NODEC-1'];
+    // Options for digipeater dropdown (excluding sender and final destination)
+    const digipeaterOptions = useMemo(() => {
+        let options = ['NONE']; // Option for no digipeater
+        nodeOptions.forEach(node => {
+            if (node !== selectedSender && node !== selectedUIFrameDest) {
+                options.push(node);
+            }
+        });
+        return options;
+    }, [nodeOptions, selectedSender, selectedUIFrameDest]);
+
+    // Update selectedDigipeater if current value becomes invalid
+    useEffect(() => {
+        if (!digipeaterOptions.includes(selectedDigipeater)) {
+            setSelectedDigipeater('NONE');
+        }
+    }, [digipeaterOptions, selectedDigipeater]);
+
 
     return (
         <div style={{ display: 'flex', fontFamily: 'monospace', gap: '20px', padding: '20px', flexWrap: 'wrap' }}>
@@ -1135,6 +1210,14 @@ function App() {
                     <label htmlFor="uiframe-dest-select" style={{ marginRight: '10px' }}>UI-Frame Destination (Connectionless):</label>
                     <select id="uiframe-dest-select" value={selectedUIFrameDest} onChange={(e) => setSelectedUIFrameDest(e.target.value)} style={{ padding: '5px', borderRadius: '3px' }}>
                         {nodeOptions.filter(opt => opt !== selectedSender).map(node => (
+                            <option key={node} value={node}>{node}</option>
+                        ))}
+                    </select>
+                </div>
+                <div style={{ marginBottom: '10px' }}>
+                    <label htmlFor="digipeater-select" style={{ marginRight: '10px' }}>Digipeater (for UI-Frame):</label>
+                    <select id="digipeater-select" value={selectedDigipeater} onChange={(e) => setSelectedDigipeater(e.target.value)} style={{ padding: '5px', borderRadius: '3px' }}>
+                        {digipeaterOptions.map(node => (
                             <option key={node} value={node}>{node}</option>
                         ))}
                     </select>
