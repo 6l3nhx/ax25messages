@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AX.25 Packet Radio Simulator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', 'monospace', sans-serif;
+        }
+        /* Custom styles for better visual feedback */
+        .status-connected { color: #22c55e; /* green-500 */ }
+        .status-disconnected { color: #ef4444; /* red-500 */ }
+        .status-connecting, .status-disconnecting { color: #f97316; /* orange-500 */ }
+
+        .log-message-ui { color: #3b82f6; /* blue-500 */ }
+        .log-message-info { color: #1f2937; /* gray-800 */ }
+        .log-message-system { color: #8b5cf6; /* violet-500 */ }
+        .log-message-error { color: #ef4444; /* red-500 */ }
+        .log-message-debug { color: #6b7280; /* gray-500 */ }
+
+        .btn {
+            padding: 8px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .btn-primary { background-color: #3b82f6; color: white; }
+        .btn-primary:hover { background-color: #2563eb; }
+        .btn-primary:disabled { background-color: #9ca3af; cursor: not-allowed; }
+
+        .btn-secondary { background-color: #6b7280; color: white; }
+        .btn-secondary:hover { background-color: #4b5563; }
+
+        .btn-success { background-color: #22c55e; color: white; }
+        .btn-success:hover { background-color: #16a34a; }
+
+        .btn-danger { background-color: #ef4444; color: white; }
+        .btn-danger:hover { background-color: #dc2626; }
+        .btn-danger:disabled { background-color: #9ca3af; cursor: not-allowed; }
+
+        .node-panel {
+            flex: 1 1 30%;
+            min-width: 350px;
+        }
+
+        #status-message-box {
+            transition: opacity 0.5s ease-in-out, transform 0.5s ease-in-out;
+            transform: translateY(-100%);
+            opacity: 0;
+        }
+        #status-message-box.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 p-4 lg:p-8">
+
+    <!-- Main Container -->
+    <div class="container mx-auto">
+        <h1 class="text-3xl font-bold text-center text-gray-800 mb-6">AX.25 Packet Radio Simulator</h1>
+
+        <!-- Status Message Box -->
+        <div id="status-message-box" class="fixed top-5 left-1/2 -translate-x-1/2 bg-yellow-400 text-gray-800 font-semibold py-2 px-6 rounded-lg shadow-lg">
+            <span id="status-message-text"></span>
+        </div>
+
+        <!-- Node Panels -->
+        <div class="flex flex-wrap justify-center gap-6 mb-6">
+            <div id="node-a-panel" class="node-panel bg-white p-5 rounded-lg shadow-md border border-gray-200"></div>
+            <div id="node-b-panel" class="node-panel bg-white p-5 rounded-lg shadow-md border border-gray-200"></div>
+            <div id="node-c-panel" class="node-panel bg-white p-5 rounded-lg shadow-md border border-gray-200"></div>
+        </div>
+
+        <!-- Universal Send Message Section -->
+        <div class="bg-green-50 p-6 rounded-lg shadow-md border border-gray-200">
+            <h2 class="text-2xl font-bold text-gray-700 mb-4">Universal Message Sender</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+                <div>
+                    <label for="sender-select" class="block text-sm font-medium text-gray-600 mb-1">Source Node</label>
+                    <select id="sender-select" class="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500"></select>
+                </div>
+                <div>
+                    <label for="iframe-dest-select" class="block text-sm font-medium text-gray-600 mb-1">I-Frame Destination</label>
+                    <select id="iframe-dest-select" class="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500"></select>
+                </div>
+                <div>
+                    <label for="uiframe-dest-select" class="block text-sm font-medium text-gray-600 mb-1">UI-Frame Destination</label>
+                    <select id="uiframe-dest-select" class="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500"></select>
+                </div>
+                <div>
+                    <label for="digipeater-select" class="block text-sm font-medium text-gray-600 mb-1">Digipeater (for UI)</label>
+                    <select id="digipeater-select" class="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500"></select>
+                </div>
+            </div>
+            <textarea id="message-to-send" rows="3" class="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 mb-4" placeholder="Enter message to send..."></textarea>
+            <div class="flex items-center gap-4">
+                <button id="send-i-btn" class="btn btn-success">Send I-Frame</button>
+                <button id="send-ui-btn" class="btn btn-primary">Send UI-Frame</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        // --- Constants ---
+        const AX25_CONSTANTS = {
+            FLAG_BYTE: 0x7E,
+            PID_NO_LAYER_3: 0xF0,
+            CONTROL_I: 0x00,
+            CONTROL_S: 0x01,
+            CONTROL_U: 0x03,
+            CONTROL_RR: 0x01,
+            CONTROL_RNR: 0x05,
+            CONTROL_REJ: 0x09,
+            CONTROL_SREJ: 0x0D,
+            CONTROL_SABM: 0x2F,
+            CONTROL_DISC: 0x43,
+            CONTROL_UA: 0x63,
+            CONTROL_DM: 0x87,
+            CONTROL_XID: 0xAF,
+            CONTROL_TEST: 0xE3,
+            CONTROL_UI: 0x03,
+            CONTROL_FRMR: 0x87
+        };
+
+        // --- Utility Functions ---
+        function encodeCallsign(callsign, isLastAddress, isCommand, isDigipeater = false, hasBeenDigipeated = false) {
+            const parts = callsign.split('-');
+            let baseCallsign = parts[0].toUpperCase();
+            let ssid = parts.length > 1 ? parseInt(parts[1], 10) : 0;
+            if (isNaN(ssid) || ssid < 0 || ssid > 15) ssid = 0;
+            baseCallsign = baseCallsign.substring(0, 6);
+
+            const addressBytes = new Uint8Array(7);
+            for (let i = 0; i < 6; i++) {
+                addressBytes[i] = (baseCallsign.charCodeAt(i) || 0x20) << 1;
+            }
+
+            let lastByte = (ssid << 1) | (1 << 5);
+            if (!isDigipeater) {
+                if (!isCommand) lastByte |= (1 << 7);
+            } else {
+                if (hasBeenDigipeated) lastByte |= (1 << 7);
+            }
+            if (isLastAddress) lastByte |= 0x01;
+            addressBytes[6] = lastByte;
+            return addressBytes;
+        }
+
+        function decodeCallsign(bytes) {
+            let callsign = '';
+            for (let i = 0; i < 6; i++) {
+                callsign += String.fromCharCode(bytes[i] >>> 1);
+            }
+            return callsign.trim();
+        }
+
+        function calculateFCS(bytes) {
+            let fcs = 0xFFFF;
+            const polynomial = 0x8408;
+            for (const byte of bytes) {
+                fcs ^= byte;
+                for (let i = 0; i < 8; i++) {
+                    fcs = (fcs & 0x0001) ? (fcs >>> 1) ^ polynomial : fcs >>> 1;
+                }
+            }
+            return fcs ^ 0xFFFF;
+        }
+
+        // --- AX.25 Encoder & Decoder Classes ---
+        class AX25Encoder {
+            encodeFrame(destination, source, repeaters, control, pid, info, isCommandFrame, p_f_bit, isExtended = false) {
+                const addressFields = [];
+                addressFields.push(encodeCallsign(destination, repeaters.length === 0 && !source, isCommandFrame));
+                if (source) {
+                    addressFields.push(encodeCallsign(source, repeaters.length === 0, !isCommandFrame));
+                }
+                repeaters.forEach((repeater, index) => {
+                    addressFields.push(encodeCallsign(repeater.callsign, index === repeaters.length - 1, false, true, repeater.hasBeenDigipeated || false));
+                });
+
+                const addressBytes = new Uint8Array(addressFields.reduce((acc, val) => acc.concat(Array.from(val)), []));
+                let finalControlBytes = new Uint8Array(control);
+                if (p_f_bit) {
+                    finalControlBytes[0] |= 0x10;
+                }
+
+                const frameBodyParts = [addressBytes, finalControlBytes];
+                const controlByteValue = control[0];
+                const needsPid = ((controlByteValue & 0x01) === 0x00) ||
+                                 (((controlByteValue & 0x03) === AX25_CONSTANTS.CONTROL_U) &&
+                                 [AX25_CONSTANTS.CONTROL_UI, AX25_CONSTANTS.CONTROL_XID, AX25_CONSTANTS.CONTROL_TEST, AX25_CONSTANTS.CONTROL_FRMR].includes(controlByteValue & 0xEF));
+
+                if (needsPid) {
+                    frameBodyParts.push(new Uint8Array([pid ?? AX25_CONSTANTS.PID_NO_LAYER_3]));
+                }
+                if (info) {
+                    frameBodyParts.push(info);
+                }
+
+                const frameBody = new Uint8Array(frameBodyParts.reduce((acc, val) => acc.concat(Array.from(val)), []));
+                const fcs = calculateFCS(frameBody);
+                const fcsBytes = new Uint8Array([(fcs & 0xFF), (fcs >>> 8)]);
+                return new Uint8Array([AX25_CONSTANTS.FLAG_BYTE, ...frameBody, ...fcsBytes, AX25_CONSTANTS.FLAG_BYTE]);
+            }
+        }
+
+        class AX25Decoder {
+            decodeFrame(rawData) {
+                const frames = [];
+                let buffer = rawData;
+                while (buffer.length > 0) {
+                    const startIndex = buffer.indexOf(AX25_CONSTANTS.FLAG_BYTE);
+                    if (startIndex === -1) break;
+                    const endIndex = buffer.indexOf(AX25_CONSTANTS.FLAG_BYTE, startIndex + 1);
+                    if (endIndex === -1) break;
+
+                    const frameData = buffer.slice(startIndex + 1, endIndex);
+                    buffer = buffer.slice(endIndex + 1);
+                    if (frameData.length < 16) continue;
+
+                    const fcsReceived = frameData[frameData.length - 2] | (frameData[frameData.length - 1] << 8);
+                    const frameForFcs = frameData.slice(0, frameData.length - 2);
+                    const isValidFCS = calculateFCS(frameForFcs) === fcsReceived;
+
+                    let offset = 0;
+                    const addresses = [];
+                    let isLastAddress = false;
+                    while (!isLastAddress && offset <= frameForFcs.length - 7) {
+                        const addressBytes = frameForFcs.slice(offset, offset + 7);
+                        const ssidByte = addressBytes[6];
+                        isLastAddress = (ssidByte & 0x01) === 1;
+                        const callsign = decodeCallsign(addressBytes.slice(0, 6));
+                        const ssid = (ssidByte >> 1) & 0x0F;
+                        let crBitValue, hasBeenDigipeated;
+                        if (addresses.length < 2) {
+                            crBitValue = ((ssidByte >> 7) & 0x01);
+                        } else {
+                            hasBeenDigipeated = ((ssidByte >> 7) & 0x01) === 1;
+                        }
+                        addresses.push({ callsign, ssid, crBitValue, hasBeenDigipeated });
+                        offset += 7;
+                    }
+
+                    if (addresses.length < 2) continue;
+                    const [destination, source] = addresses;
+                    const repeaters = addresses.slice(2);
+
+                    const control = frameForFcs.slice(offset, offset + 1);
+                    offset++;
+                    const p_f_bit = (control[0] & 0x10) !== 0;
+                    let pid = null, info = null, ns, nr;
+                    
+                    const controlByteValue = control[0];
+                    const isIFrame = (controlByteValue & 0x01) === 0x00;
+                    const isSFrame = (controlByteValue & 0x03) === 0x01;
+                    const isUFrame = (controlByteValue & 0x03) === 0x03;
+
+                    const uFrameSubtype = controlByteValue & 0xEF;
+                    const needsPidDecode = isIFrame || (isUFrame && [AX25_CONSTANTS.CONTROL_UI, AX25_CONSTANTS.CONTROL_XID, AX25_CONSTANTS.CONTROL_TEST, AX25_CONSTANTS.CONTROL_FRMR].includes(uFrameSubtype));
+                    
+                    if (needsPidDecode && offset < frameForFcs.length) {
+                        pid = frameForFcs[offset++];
+                    }
+                    if (offset < frameForFcs.length) {
+                        info = frameForFcs.slice(offset);
+                    }
+
+                    if (isIFrame) {
+                        ns = (control[0] >>> 1) & 0x07;
+                        nr = (control[0] >>> 5) & 0x07;
+                    } else if (isSFrame) {
+                        nr = (control[0] >>> 5) & 0x07;
+                    }
+
+                    frames.push({ destination, source, repeaters, control, pid, info, isValidFCS, p_f_bit, isCommand: destination.crBitValue === 0, isExtended: false, ns, nr });
+                }
+                return frames;
+            }
+        }
+
+        // --- Link State Machine ---
+        const LinkState = {
+            DISCONNECTED: 'DISCONNECTED',
+            CONNECTING: 'CONNECTING',
+            CONNECTED: 'CONNECTED',
+            DISCONNECTING: 'DISCONNECTING',
+        };
+
+        class AX25Link {
+            constructor(localCallsign, sendFunction, callbacks) {
+                this.localCallsign = localCallsign;
+                this.physicalLayerSend = sendFunction;
+                this.callbacks = callbacks;
+                this.encoder = new AX25Encoder();
+                this.decoder = new AX25Decoder();
+                this.state = LinkState.DISCONNECTED;
+                this.remoteCallsign = null;
+                this.V_S = 0;
+                this.V_R = 0;
+                this.V_A = 0;
+                this.retransmissionBuffer = [];
+                this.t1Timer = null;
+                this.retransmitCount = 0;
+                this.lastSentDiscFrame = null;
+                this.N1_MAX_BYTES = 256;
+                this.T1_TIMEOUT_MS = 3000;
+                this.N2_RETRY_COUNT = 10;
+            }
+
+            log(level, message) { this.callbacks.onInternalLog?.(level, message); }
+            setState(newState) {
+                if (this.state !== newState) {
+                    const oldState = this.state;
+                    this.state = newState;
+                    this.callbacks.onStateChange?.(newState, oldState);
+                }
+            }
+            startT1Timer() {
+                this.clearT1Timer();
+                this.t1Timer = setTimeout(() => this.handleT1Timeout(), this.T1_TIMEOUT_MS);
+            }
+            clearT1Timer() { if (this.t1Timer) clearTimeout(this.t1Timer); this.t1Timer = null; }
+            
+            handleT1Timeout() {
+                this.retransmitCount++;
+                if (this.retransmitCount >= this.N2_RETRY_COUNT) {
+                    this.log('ERROR', `T1 timeout, N2 retry limit exceeded. Disconnecting.`);
+                    this.disconnect('N2 retry limit exceeded');
+                    return;
+                }
+                this.log('WARN', `T1 timeout. Retransmitting. Attempt ${this.retransmitCount}/${this.N2_RETRY_COUNT}.`);
+                if (this.state === LinkState.CONNECTING && this.remoteCallsign) {
+                    const sabmFrame = this.encoder.encodeFrame(this.remoteCallsign, this.localCallsign, [], new Uint8Array([AX25_CONSTANTS.CONTROL_SABM]), null, null, true, true);
+                    this.physicalLayerSend(sabmFrame);
+                    this.callbacks.onFrameSent?.(sabmFrame, 'Retransmitting SABM');
+                    this.startT1Timer();
+                } else if (this.state === LinkState.DISCONNECTING && this.lastSentDiscFrame) {
+                    this.physicalLayerSend(this.lastSentDiscFrame);
+                    this.callbacks.onFrameSent?.(this.lastSentDiscFrame, 'Retransmitting DISC');
+                    this.startT1Timer();
+                } else if (this.state === LinkState.CONNECTED && this.retransmissionBuffer.length > 0) {
+                    const { frame, ns } = this.retransmissionBuffer[0];
+                    this.physicalLayerSend(frame);
+                    this.callbacks.onFrameSent?.(frame, `Retransmitting I-frame N(S)=${ns}`);
+                    this.startT1Timer();
+                }
+            }
+
+            connect(destination) {
+                if (this.state !== LinkState.DISCONNECTED) return;
+                this.remoteCallsign = destination;
+                this.setState(LinkState.CONNECTING);
+                this.V_S = this.V_R = this.V_A = 0;
+                this.retransmissionBuffer = [];
+                this.retransmitCount = 0;
+                this.lastSentDiscFrame = null;
+                const sabmFrame = this.encoder.encodeFrame(destination, this.localCallsign, [], new Uint8Array([AX25_CONSTANTS.CONTROL_SABM]), null, null, true, true);
+                this.physicalLayerSend(sabmFrame);
+                this.callbacks.onFrameSent?.(sabmFrame, 'SABM');
+                this.startT1Timer();
+            }
+
+            disconnect(reason = 'User request') {
+                if (this.state === LinkState.DISCONNECTED) return;
+                this.clearT1Timer();
+                const peer = this.remoteCallsign || '';
+                this.V_S = this.V_R = this.V_A = 0;
+                this.retransmissionBuffer = [];
+                this.retransmitCount = 0;
+
+                if (this.remoteCallsign) {
+                    this.setState(LinkState.DISCONNECTING);
+                    const discFrame = this.encoder.encodeFrame(this.remoteCallsign, this.localCallsign, [], new Uint8Array([AX25_CONSTANTS.CONTROL_DISC]), null, null, true, true);
+                    this.lastSentDiscFrame = discFrame;
+                    this.physicalLayerSend(discFrame);
+                    this.callbacks.onFrameSent?.(discFrame, 'DISC');
+                    this.startT1Timer();
+                } else {
+                    this.setState(LinkState.DISCONNECTED);
+                    this.callbacks.onDisconnected?.(peer, reason);
+                    this.lastSentDiscFrame = null;
+                }
+            }
+
+            sendIFrame(data) {
+                if (this.state !== LinkState.CONNECTED || !this.remoteCallsign) return;
+                const ns = this.V_S % 8;
+                const nr = this.V_R % 8;
+                let controlByte = (ns << 1) | (nr << 5);
+                const iFrameBytes = this.encoder.encodeFrame(this.remoteCallsign, this.localCallsign, [], new Uint8Array([controlByte]), AX25_CONSTANTS.PID_NO_LAYER_3, data, true, false);
+                this.physicalLayerSend(iFrameBytes);
+                this.callbacks.onFrameSent?.(iFrameBytes, `I-Frame N(S)=${ns}, N(R)=${nr}`);
+                this.retransmissionBuffer.push({ frame: iFrameBytes, ns: ns });
+                this.V_S = (this.V_S + 1) % 8;
+                this.startT1Timer();
+            }
+
+            sendUIFrame(destination, data, repeaters = []) {
+                const uiFrame = this.encoder.encodeFrame(destination, this.localCallsign, repeaters, new Uint8Array([AX25_CONSTANTS.CONTROL_UI]), AX25_CONSTANTS.PID_NO_LAYER_3, data, true, false);
+                this.physicalLayerSend(uiFrame);
+                this.callbacks.onFrameSent?.(uiFrame, `UI-Frame to ${destination}`);
+            }
+
+            sendUAFrame(destination, isCommand, p_f_bit) {
+                const uaFrame = this.encoder.encodeFrame(destination, this.localCallsign, [], new Uint8Array([AX25_CONSTANTS.CONTROL_UA]), null, null, isCommand, p_f_bit);
+                this.physicalLayerSend(uaFrame);
+                this.callbacks.onFrameSent?.(uaFrame, 'UA');
+            }
+            
+            sendDMFrame(destination, isCommand, p_f_bit) {
+                const dmFrame = this.encoder.encodeFrame(destination, this.localCallsign, [], new Uint8Array([AX25_CONSTANTS.CONTROL_DM]), null, null, isCommand, p_f_bit);
+                this.physicalLayerSend(dmFrame);
+                this.callbacks.onFrameSent?.(dmFrame, 'DM');
+            }
+
+            sendRRFrame(destination, isCommand, p_f_bit, nr) {
+                let controlByte = AX25_CONSTANTS.CONTROL_RR | (nr << 5);
+                if (p_f_bit) controlByte |= 0x10;
+                const rrFrame = this.encoder.encodeFrame(destination, this.localCallsign, [], new Uint8Array([controlByte]), null, null, isCommand, p_f_bit);
+                this.physicalLayerSend(rrFrame);
+                this.callbacks.onFrameSent?.(rrFrame, `RR N(R)=${nr}`);
+            }
+
+            receiveRawData(data) {
+                const frames = this.decoder.decodeFrame(data);
+                frames.forEach(frame => {
+                    this.callbacks.onFrameReceived?.(frame, data);
+                    if (!frame.isValidFCS) {
+                        this.log('ERROR', `Invalid FCS from ${frame.source.callsign}`);
+                        return;
+                    }
+
+                    const fullDest = `${frame.destination.callsign}-${frame.destination.ssid}`;
+                    const fullSource = `${frame.source.callsign}-${frame.source.ssid}`;
+                    const isForMe = fullDest === this.localCallsign;
+                    const isBroadcastUI = frame.control[0] === AX25_CONSTANTS.CONTROL_UI && frame.destination.callsign === 'CQ';
+
+                    // Digipeater Logic
+                    const digipeaterIndex = frame.repeaters.findIndex(r => `${r.callsign}-${r.ssid}` === this.localCallsign && !r.hasBeenDigipeated);
+                    if (digipeaterIndex !== -1) {
+                        this.log('INFO', `Digipeating frame to ${fullDest}`);
+                        const newRepeaters = frame.repeaters.map((r, idx) => (idx === digipeaterIndex ? { ...r, hasBeenDigipeated: true } : r));
+                        const retransmittedFrame = this.encoder.encodeFrame(frame.destination.callsign, frame.source.callsign, newRepeaters, frame.control, frame.pid, frame.info, frame.isCommand, frame.p_f_bit, frame.isExtended);
+                        this.physicalLayerSend(retransmittedFrame);
+                        this.callbacks.onFrameSent?.(retransmittedFrame, `Digipeated frame to ${fullDest}`);
+                        if (!isForMe) return; // Stop processing if not final destination
+                    }
+
+                    if (!isForMe && !isBroadcastUI) return;
+
+                    const controlByte = frame.control[0];
+                    const uFrameSubtype = controlByte & 0xEF;
+                    const isIFrame = (controlByte & 0x01) === 0x00;
+                    const isSFrame = (controlByte & 0x03) === 0x01;
+                    const isUFrame = (controlByte & 0x03) === 0x03;
+
+                    // State-based handling
+                    switch (this.state) {
+                        case LinkState.DISCONNECTED:
+                            if (isUFrame && uFrameSubtype === AX25_CONSTANTS.CONTROL_SABM) {
+                                this.remoteCallsign = fullSource;
+                                this.setState(LinkState.CONNECTED);
+                                this.V_S = this.V_R = this.V_A = 0;
+                                this.retransmissionBuffer = [];
+                                this.retransmitCount = 0;
+                                this.lastSentDiscFrame = null;
+                                this.sendUAFrame(fullSource, false, frame.p_f_bit);
+                                this.callbacks.onConnected?.(this.remoteCallsign, null);
+                            } else if (isUFrame && uFrameSubtype === AX25_CONSTANTS.CONTROL_UI) {
+                                this.callbacks.onUIFrameReceived?.(frame.info, frame.source.callsign, frame.destination.callsign, frame.pid, frame.repeaters);
+                            } else if (frame.isCommand) {
+                                this.sendDMFrame(fullSource, false, frame.p_f_bit);
+                            }
+                            break;
+                        
+                        case LinkState.CONNECTING:
+                            if (isUFrame && uFrameSubtype === AX25_CONSTANTS.CONTROL_UA && fullSource === this.remoteCallsign) {
+                                this.setState(LinkState.CONNECTED);
+                                this.callbacks.onConnected?.(this.remoteCallsign, null);
+                                this.clearT1Timer();
+                            } else if (isUFrame && uFrameSubtype === AX25_CONSTANTS.CONTROL_DM && fullSource === this.remoteCallsign) {
+                                this.disconnect("Connection rejected by peer (DM)");
+                                this.clearT1Timer();
+                            } else if (frame.isCommand) {
+                                this.sendDMFrame(fullSource, false, frame.p_f_bit);
+                            }
+                            break;
+
+                        case LinkState.CONNECTED:
+                            if (fullSource !== this.remoteCallsign) {
+                                if (frame.isCommand) this.sendDMFrame(fullSource, false, frame.p_f_bit);
+                                return;
+                            }
+                            if (isUFrame) {
+                                if (uFrameSubtype === AX25_CONSTANTS.CONTROL_UI) {
+                                    this.callbacks.onUIFrameReceived?.(frame.info, frame.source.callsign, frame.destination.callsign, frame.pid, frame.repeaters);
+                                } else if (uFrameSubtype === AX25_CONSTANTS.CONTROL_DISC) {
+                                    this.sendUAFrame(fullSource, false, frame.p_f_bit);
+                                    this.disconnect("Peer disconnected");
+                                }
+                            } else if (isIFrame) {
+                                const { ns, nr } = frame;
+                                if (nr !== this.V_A) {
+                                    this.retransmissionBuffer = this.retransmissionBuffer.filter(buf => {
+                                        const isAcked = (buf.ns >= this.V_A && buf.ns < nr) || (this.V_A > nr && (buf.ns >= this.V_A || buf.ns < nr));
+                                        return !isAcked;
+                                    });
+                                    this.V_A = nr;
+                                    if (this.retransmissionBuffer.length === 0) this.clearT1Timer(); else this.startT1Timer();
+                                }
+                                if (ns === this.V_R) {
+                                    this.callbacks.onDataReceived?.(frame.info, frame.source.callsign, frame.pid);
+                                    this.V_R = (this.V_R + 1) % 8;
+                                    this.sendRRFrame(fullSource, false, false, this.V_R);
+                                } else {
+                                    this.log('WARN', `Out-of-sequence I-Frame N(S)=${ns}. Expected ${this.V_R}.`);
+                                    this.sendRRFrame(fullSource, false, false, this.V_R); // Acknowledge up to V_R
+                                }
+                            } else if (isSFrame) {
+                                // Simplified S-Frame handling
+                                const { nr } = frame;
+                                if (nr !== this.V_A) {
+                                     this.retransmissionBuffer = this.retransmissionBuffer.filter(buf => {
+                                        const isAcked = (buf.ns >= this.V_A && buf.ns < nr) || (this.V_A > nr && (buf.ns >= this.V_A || buf.ns < nr));
+                                        return !isAcked;
+                                    });
+                                    this.V_A = nr;
+                                    if (this.retransmissionBuffer.length === 0) this.clearT1Timer(); else this.startT1Timer();
+                                }
+                            }
+                            break;
+
+                        case LinkState.DISCONNECTING:
+                            if ((isUFrame && (uFrameSubtype === AX25_CONSTANTS.CONTROL_UA || uFrameSubtype === AX25_CONSTANTS.CONTROL_DM)) && fullSource === this.remoteCallsign) {
+                                this.setState(LinkState.DISCONNECTED);
+                                this.callbacks.onDisconnected?.(this.remoteCallsign, "Disconnected by peer");
+                                this.clearT1Timer();
+                                this.remoteCallsign = null;
+                                this.lastSentDiscFrame = null;
+                            } else if (frame.isCommand) {
+                                this.sendDMFrame(fullSource, false, frame.p_f_bit);
+                            }
+                            break;
+                    }
+                });
+            }
+        }
+
+        // --- Main Application Logic ---
+        const nodes = {};
+        const nodeCallsigns = ['NODEA-1', 'NODEB-1', 'NODEC-1'];
+        const networkDecoder = new AX25Decoder();
+
+        function displayStatusMessage(message) {
+            const box = document.getElementById('status-message-box');
+            const text = document.getElementById('status-message-text');
+            text.textContent = message;
+            box.classList.add('show');
+            setTimeout(() => box.classList.remove('show'), 3000);
+        }
+
+        function handleNetworkSend(frameBytes) {
+            const decodedFrames = networkDecoder.decodeFrame(frameBytes);
+            if (decodedFrames.length === 0) {
+                console.warn("Could not decode frame for network send.");
+                return;
+            }
+            const frame = decodedFrames[0];
+            const destinationCallsign = `${frame.destination.callsign}-${frame.destination.ssid}`;
+
+            const isBroadcast = frame.destination.callsign === 'CQ';
+            const hasDigipeaterPath = frame.repeaters.length > 0;
+
+            // Simulate physical layer delay
+            setTimeout(() => {
+                if (isBroadcast || hasDigipeaterPath) {
+                    // Broadcast to all nodes if it's a CQ call or uses a digipeater path
+                    Object.values(nodes).forEach(node => node.link.receiveRawData(frameBytes));
+                } else {
+                    // Point-to-point, send only to the specific destination
+                    if (nodes[destinationCallsign]) {
+                        nodes[destinationCallsign].link.receiveRawData(frameBytes);
+                    } else {
+                        console.warn(`Frame sent to unknown destination: ${destinationCallsign}`);
+                    }
+                }
+            }, 50 + Math.random() * 50);
+        }
+
+        function createNodeUI(nodeId, callsign) {
+            const panel = document.getElementById(nodeId);
+            panel.innerHTML = `
+                <div class="flex justify-between items-start mb-2">
+                    <h2 class="text-xl font-bold text-gray-800">Node ${callsign}</h2>
+                    <p class="font-semibold text-lg"><span id="${callsign}-status" class="status-disconnected">DISCONNECTED</span></p>
+                </div>
+                <p id="${callsign}-peer" class="text-sm text-gray-600 mb-3 h-5"></p>
+                <div class="flex items-center gap-2 mb-4">
+                    <select id="${callsign}-connect-target" class="flex-grow p-2 border border-gray-300 rounded-md shadow-sm"></select>
+                    <button id="${callsign}-connect-btn" class="btn btn-primary">Connect</button>
+                    <button id="${callsign}-disconnect-btn" class="btn btn-danger">Disconnect</button>
+                </div>
+                <h3 class="text-md font-semibold text-gray-700 mb-2 border-t pt-2">Logs</h3>
+                <div id="${callsign}-logs" class="h-48 overflow-y-auto bg-gray-50 p-2 border rounded-md text-xs"></div>
+            `;
+        }
+        
+        function updateNodeUI(callsign, link) {
+            const statusEl = document.getElementById(`${callsign}-status`);
+            const peerEl = document.getElementById(`${callsign}-peer`);
+            const connectBtn = document.getElementById(`${callsign}-connect-btn`);
+            const disconnectBtn = document.getElementById(`${callsign}-disconnect-btn`);
+            const connectTargetEl = document.getElementById(`${callsign}-connect-target`);
+
+            statusEl.textContent = link.state;
+            statusEl.className = `status-${link.state.toLowerCase()}`;
+            peerEl.textContent = link.state === 'CONNECTED' ? `Connected to: ${link.remoteCallsign}` : '';
+            connectBtn.disabled = link.state !== 'DISCONNECTED';
+            disconnectBtn.disabled = link.state === 'DISCONNECTED';
+            connectTargetEl.disabled = link.state !== 'DISCONNECTED';
+        }
+
+        function addLogMessage(callsign, level, text) {
+            const logsEl = document.getElementById(`${callsign}-logs`);
+            const p = document.createElement('p');
+            p.className = `log-message-${level.toLowerCase()}`;
+            p.textContent = `[${level}] ${text}`;
+            logsEl.appendChild(p);
+            logsEl.scrollTop = logsEl.scrollHeight;
+        }
+        
+        nodeCallsigns.forEach(callsign => {
+            const nodeId = `node-${callsign.charAt(4).toLowerCase()}-panel`;
+            createNodeUI(nodeId, callsign);
+
+            const link = new AX25Link(callsign, handleNetworkSend, {
+                onStateChange: () => updateNodeUI(callsign, link),
+                onDataReceived: (data, src) => addLogMessage(callsign, 'INFO', `I-Frame from ${src}: ${new TextDecoder().decode(data)}`),
+                onUIFrameReceived: (data, src, dest, pid, rpt) => addLogMessage(callsign, 'UI', `UI from ${src} to ${dest}: ${new TextDecoder().decode(data)}`),
+                onConnected: (peer) => {
+                    addLogMessage(callsign, 'SYSTEM', `Connected to ${peer}`);
+                    updateNodeUI(callsign, link);
+                },
+                onDisconnected: (peer, reason) => {
+                    addLogMessage(callsign, 'SYSTEM', `Disconnected from ${peer}. Reason: ${reason}`);
+                    updateNodeUI(callsign, link);
+                },
+                onError: (err) => addLogMessage(callsign, 'ERROR', err.message),
+                onFrameSent: (bytes, desc) => addLogMessage(callsign, 'DEBUG', `SENT: ${desc}`),
+                onFrameReceived: (frame, raw) => addLogMessage(callsign, 'DEBUG', `RECV: ${frame.source.callsign} -> ${frame.destination.callsign}`),
+                onInternalLog: (level, msg) => addLogMessage(callsign, level, msg),
+            });
+            nodes[callsign] = { link, panelId: nodeId };
+            
+            // Populate connect dropdown
+            const connectTargetEl = document.getElementById(`${callsign}-connect-target`);
+            nodeCallsigns.filter(c => c !== callsign).forEach(c => {
+                const option = document.createElement('option');
+                option.value = c;
+                option.textContent = c;
+                connectTargetEl.appendChild(option);
+            });
+
+            // Add event listeners
+            document.getElementById(`${callsign}-connect-btn`).addEventListener('click', () => {
+                const target = connectTargetEl.value;
+                link.connect(target);
+            });
+            document.getElementById(`${callsign}-disconnect-btn`).addEventListener('click', () => link.disconnect());
+            
+            updateNodeUI(callsign, link);
+        });
+
+        // Setup Universal Sender
+        const senderSelect = document.getElementById('sender-select');
+        const iframeDestSelect = document.getElementById('iframe-dest-select');
+        const uiframeDestSelect = document.getElementById('uiframe-dest-select');
+        const digipeaterSelect = document.getElementById('digipeater-select');
+        const messageInput = document.getElementById('message-to-send');
+        const sendIBtn = document.getElementById('send-i-btn');
+        const sendUIBtn = document.getElementById('send-ui-btn');
+
+        function updateSenderOptions() {
+            const sender = senderSelect.value;
+            
+            // Update I-Frame destinations
+            iframeDestSelect.innerHTML = '';
+            nodeCallsigns.filter(c => c !== sender).forEach(c => {
+                const option = document.createElement('option');
+                option.value = c;
+                option.textContent = c;
+                iframeDestSelect.appendChild(option);
+            });
+
+            // Update UI-Frame destinations and digipeaters
+            updateUIDestOptions();
+        }
+
+        function updateUIDestOptions() {
+            const sender = senderSelect.value;
+            const uiDest = uiframeDestSelect.value;
+            
+            uiframeDestSelect.innerHTML = '';
+            nodeCallsigns.filter(c => c !== sender).forEach(c => {
+                const option = document.createElement('option');
+                option.value = c;
+                option.textContent = c;
+                uiframeDestSelect.appendChild(option);
+            });
+            if (uiDest && uiDest !== sender) uiframeDestSelect.value = uiDest;
+
+            const currentUIDest = uiframeDestSelect.value;
+            digipeaterSelect.innerHTML = '<option value="">NONE</option>';
+            nodeCallsigns.filter(c => c !== sender && c !== currentUIDest).forEach(c => {
+                const option = document.createElement('option');
+                option.value = c;
+                option.textContent = c;
+                digipeaterSelect.appendChild(option);
+            });
+        }
+
+        nodeCallsigns.forEach(c => {
+            const option = document.createElement('option');
+            option.value = c;
+            option.textContent = c;
+            senderSelect.appendChild(option);
+        });
+        
+        senderSelect.addEventListener('change', updateSenderOptions);
+        uiframeDestSelect.addEventListener('change', updateUIDestOptions);
+        
+        sendIBtn.addEventListener('click', () => {
+            const sender = senderSelect.value;
+            const dest = iframeDestSelect.value;
+            const message = messageInput.value;
+            const node = nodes[sender].link;
+            if (node.state === 'CONNECTED' && node.remoteCallsign === dest) {
+                node.sendIFrame(new TextEncoder().encode(message));
+                messageInput.value = '';
+            } else {
+                displayStatusMessage(`Error: ${sender} is not connected to ${dest}.`);
+            }
+        });
+
+        sendUIBtn.addEventListener('click', () => {
+            const sender = senderSelect.value;
+            const dest = uiframeDestSelect.value;
+            const digi = digipeaterSelect.value;
+            const message = messageInput.value;
+            const node = nodes[sender].link;
+            const repeaters = digi ? [{ callsign: digi.split('-')[0], ssid: parseInt(digi.split('-')[1] || '0'), hasBeenDigipeated: false }] : [];
+            node.sendUIFrame(dest, new TextEncoder().encode(message), repeaters);
+            messageInput.value = '';
+        });
+
+        // Initial setup
+        updateSenderOptions();
+
+    </script>
+</body>
+</html>
